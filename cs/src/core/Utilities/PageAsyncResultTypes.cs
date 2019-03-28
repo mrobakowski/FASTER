@@ -12,7 +12,7 @@ namespace FASTER.core
     /// Result of async page read
     /// </summary>
     /// <typeparam name="TContext"></typeparam>
-    public struct PageAsyncReadResult<TContext> : IAsyncResult
+    public class PageAsyncReadResult<TContext> : IAsyncResult
     {
         /// <summary>
         /// Page
@@ -29,10 +29,12 @@ namespace FASTER.core
 
         internal CountdownEvent handle;
         internal SectorAlignedMemory freeBuffer1;
+        internal SectorAlignedMemory freeBuffer2;
         internal IOCompletionCallback callback;
         internal IDevice objlogDevice;
         internal long resumeptr;
         internal long untilptr;
+        internal object frame;
 
         /// <summary>
         /// 
@@ -59,12 +61,16 @@ namespace FASTER.core
         /// </summary>
         public void Free()
         {
-            if (freeBuffer1.buffer != null)
-                freeBuffer1.Return();
-
-            if (handle != null)
+            if (freeBuffer1 != null)
             {
-                handle.Signal();
+                freeBuffer1.Return();
+                freeBuffer1 = null;
+            }
+
+            if (freeBuffer2 != null)
+            {
+                freeBuffer2.Return();
+                freeBuffer2 = null;
             }
         }
     }
@@ -89,6 +95,7 @@ namespace FASTER.core
         public int count;
 
         internal bool partial;
+        internal long fromAddress;
         internal long untilAddress;
         internal CountdownEvent handle;
         internal IDevice objlogDevice;
@@ -121,11 +128,16 @@ namespace FASTER.core
         /// </summary>
         public void Free()
         {
-            if (freeBuffer1.buffer != null)
+            if (freeBuffer1 != null)
+            {
                 freeBuffer1.Return();
-            if (freeBuffer2.buffer != null)
+                freeBuffer1 = null;
+            }
+            if (freeBuffer2 != null)
+            {
                 freeBuffer2.Return();
-
+                freeBuffer2 = null;
+            }
             if (handle != null)
             {
                 handle.Signal();

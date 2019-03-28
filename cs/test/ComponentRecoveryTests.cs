@@ -20,7 +20,7 @@ namespace FASTER.test.recovery
         {
             int seed = 123;
             var rand1 = new Random(seed);
-            var device = new LocalStorageDevice(TestContext.CurrentContext.TestDirectory + "\\test_ofb.dat", deleteOnClose: true);
+            var device = Devices.CreateLogDevice(TestContext.CurrentContext.TestDirectory + "\\test_ofb.dat", deleteOnClose: true);
             var allocator = new MallocFixedPageSize<HashBucket>();
 
             //do something
@@ -70,8 +70,8 @@ namespace FASTER.test.recovery
             int size = 1 << 16;
             long numAdds = 1 << 18;
 
-            IDevice ht_device = new LocalStorageDevice(TestContext.CurrentContext.TestDirectory + "\\ht.dat", deleteOnClose: true);
-            IDevice ofb_device = new LocalStorageDevice(TestContext.CurrentContext.TestDirectory + "\\ofb.dat", deleteOnClose: true);
+            IDevice ht_device = Devices.CreateLogDevice(TestContext.CurrentContext.TestDirectory + "\\ht.dat", deleteOnClose: true);
+            IDevice ofb_device = Devices.CreateLogDevice(TestContext.CurrentContext.TestDirectory + "\\ofb.dat", deleteOnClose: true);
 
             var hash_table1 = new FasterBase();
             hash_table1.Initialize(size, 512);
@@ -89,7 +89,7 @@ namespace FASTER.test.recovery
                 var tag = (ushort)((ulong)hash >> Constants.kHashTagShift);
 
                 var entry = default(HashBucketEntry);
-                hash_table1.FindOrCreateTag(hash, tag, ref bucket, ref slot, ref entry);
+                hash_table1.FindOrCreateTag(hash, tag, ref bucket, ref slot, ref entry, 0);
 
                 hash_table1.UpdateSlot(bucket, slot, entry.word, valueGenerator.Next(), out long found_word);
             }

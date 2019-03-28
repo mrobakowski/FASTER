@@ -32,48 +32,11 @@ namespace FASTER.core
         CPR_PENDING_DETECTED
     }
 
-
-
-    internal unsafe struct PendingContext
-    {
-        // User provided information
-
-        public OperationType type;
-
-        public Key* key;
-
-        public Input* input;
-
-        public Output* output;
-
-        public Value* value;
-
-        public Context* userContext;
-
-        // Some additional information about the previous attempt
-
-        public long id;
-
-        public int version;
-
-        public long logicalAddress;
-
-        public long serialNum;
-
-        public HashBucketEntry entry;
-    }
-
-    internal unsafe class ExecutionContext
+    internal class SerializedFasterExecutionContext
     {
         public int version;
         public long serialNum;
-        public Phase phase;
-        public bool[] markers;
-        public long totalPending;
         public Guid guid;
-        public Queue<PendingContext> retryRequests;
-        public Dictionary<long, PendingContext> ioPendingRequests;
-        public BlockingCollection<AsyncIOContext> readyResponses;
 
         public void Write(StreamWriter writer)
         {
@@ -81,6 +44,7 @@ namespace FASTER.core
             writer.WriteLine(guid);
             writer.WriteLine(serialNum);
         }
+
         public void Load(StreamReader reader)
         {
             string value = reader.ReadLine();
@@ -94,8 +58,56 @@ namespace FASTER.core
         }
     }
 
-    internal struct DirectoryConfiguration
+    public unsafe partial class FasterKV<Key, Value, Input, Output, Context, Functions> : FasterBase, IFasterKV<Key, Value, Input, Output, Context>
+        where Key : new()
+        where Value : new()
+        where Functions : IFunctions<Key, Value, Input, Output, Context>
     {
+
+        internal struct PendingContext
+        {
+            // User provided information
+
+            public OperationType type;
+
+            public Key key;
+            public Value value;
+            public Input input;
+            public Output output;
+            public Context userContext;
+
+            // Some additional information about the previous attempt
+
+            public long id;
+
+            public int version;
+
+            public long logicalAddress;
+
+            public long serialNum;
+
+            public HashBucketEntry entry;
+        }
+
+        internal class FasterExecutionContext : SerializedFasterExecutionContext
+        {
+            public Phase phase;
+            public bool[] markers;
+            public long totalPending;
+            public Queue<PendingContext> retryRequests;
+            public Dictionary<long, PendingContext> ioPendingRequests;
+            public BlockingCollection<AsyncIOContext<Key, Value>> readyResponses;
+        }
+    }
+
+    internal class DirectoryConfiguration
+    {
+        private readonly string checkpointDir;
+        public DirectoryConfiguration(string checkpointDir)
+        {
+            this.checkpointDir = checkpointDir;
+        }
+
         public const string index_base_folder = "index-checkpoints";
         public const string index_meta_file = "info";
         public const string hash_table_file = "ht";
@@ -105,9 +117,7 @@ namespace FASTER.core
         public const string cpr_base_folder = "cpr-checkpoints";
         public const string cpr_meta_file = "info";
 
-        public const string hlog_file = "lss.log";
-
-        public static void CreateIndexCheckpointFolder(Guid token)
+        public void CreateIndexCheckpointFolder(Guid token)
         {
             var directory = GetIndexCheckpointFolder(token);
             Directory.CreateDirectory(directory);
@@ -115,7 +125,7 @@ namespace FASTER.core
             foreach (System.IO.FileInfo file in directoryInfo.GetFiles())
                 file.Delete();
         }
-        public static void CreateHybridLogCheckpointFolder(Guid token)
+        public void CreateHybridLogCheckpointFolder(Guid token)
         {
             var directory = GetHybridLogCheckpointFolder(token);
             Directory.CreateDirectory(directory);
@@ -124,61 +134,102 @@ namespace FASTER.core
                 file.Delete();
         }
 
-        public static string GetIndexCheckpointFolder(Guid token)
+        public string GetIndexCheckpointFolder(Guid token = default(Guid))
         {
-            return String.Format("{0}\\{1}\\{2}", Config.CheckpointDirectory, index_base_folder, token);
+            if (token != default(Guid))
+                return GetMergedFolderPath(checkpointDir, index_base_folder, token.ToString());
+            else
+                return GetMergedFolderPath(checkpointDir, index_base_folder);
         }
-        public static string GetHybridLogCheckpointFolder(Guid token)
+
+        public string GetHybridLogCheckpointFolder(Guid token = default(Guid))
         {
-            return String.Format("{0}\\{1}\\{2}", Config.CheckpointDirectory, cpr_base_folder, token);
+            if (token != default(Guid))
+                return GetMergedFolderPath(checkpointDir, cpr_base_folder, token.ToString());
+            else
+                return GetMergedFolderPath(checkpointDir, cpr_base_folder);
         }
-        public static string GetIndexCheckpointMetaFileName(Guid token)
+
+        public string GetIndexCheckpointMetaFileName(Guid token)
         {
-            return String.Format("{0}\\{1}\\{2}\\{3}.dat",
-                                    Config.CheckpointDirectory,
+            return GetMergedFolderPath(checkpointDir,
                                     index_base_folder,
-                                    token,
-                                    index_meta_file);
+                                    token.ToString(),
+                                    index_meta_file,
+                                    ".dat");
         }
-        public static string GetPrimaryHashTableFileName(Guid token)
+
+        public string GetPrimaryHashTableFileName(Guid token)
         {
-            return String.Format("{0}\\{1}\\{2}\\{3}.dat",
-                                    Config.CheckpointDirectory,
+            return GetMergedFolderPath(checkpointDir,
                                     index_base_folder,
-                                    token,
-                                    hash_table_file);
+                                    token.ToString(),
+                                    hash_table_file,
+                                    ".dat");
         }
-        public static string GetOverflowBucketsFileName(Guid token)
+
+        public string GetOverflowBucketsFileName(Guid token)
         {
-            return String.Format("{0}\\{1}\\{2}\\{3}.dat",
-                                    Config.CheckpointDirectory,
+            return GetMergedFolderPath(checkpointDir,
                                     index_base_folder,
-                                    token,
-                                    overflow_buckets_file);
+                                    token.ToString(),
+                                    overflow_buckets_file,
+                                    ".dat");
         }
-        public static string GetHybridLogCheckpointMetaFileName(Guid token)
+
+        public string GetHybridLogCheckpointMetaFileName(Guid token)
         {
-            return String.Format("{0}\\{1}\\{2}\\{3}.dat",
-                                    Config.CheckpointDirectory,
+            return GetMergedFolderPath(checkpointDir,
                                     cpr_base_folder,
-                                    token,
-                                    cpr_meta_file);
+                                    token.ToString(),
+                                    cpr_meta_file,
+                                    ".dat");
         }
-        public static string GetHybridLogCheckpointContextFileName(Guid checkpointToken, Guid sessionToken)
+
+        public string GetHybridLogCheckpointContextFileName(Guid checkpointToken, Guid sessionToken)
         {
-            return String.Format("{0}\\{1}\\{2}\\{3}.dat",
-                                    Config.CheckpointDirectory,
+            return GetMergedFolderPath(checkpointDir,
                                     cpr_base_folder,
-                                    checkpointToken,
-                                    sessionToken);
+                                    checkpointToken.ToString(),
+                                    sessionToken.ToString(),
+                                    ".dat");
         }
-        public static string GetHybridLogCheckpointFileName(Guid token)
+
+        public string GetHybridLogCheckpointFileName(Guid token)
         {
-            return String.Format("{0}\\{1}\\{2}\\{3}.dat",
-                                    Config.CheckpointDirectory,
+            return GetMergedFolderPath(checkpointDir,
                                     cpr_base_folder,
-                                    token,
-                                    snapshot_file);
+                                    token.ToString(),
+                                    snapshot_file,
+                                    ".dat");
+        }
+
+        public string GetHybridLogObjectCheckpointFileName(Guid token)
+        {
+            return GetMergedFolderPath(checkpointDir,
+                                    cpr_base_folder,
+                                    token.ToString(),
+                                    snapshot_file,
+                                    ".obj.dat");
+        }
+
+        public static string GetMergedFolderPath(params String[] paths)
+        {
+            String fullPath = paths[0];
+
+            for (int i = 1; i < paths.Length; i++)
+            {
+                if (i == paths.Length - 1 && paths[i].Contains("."))
+                {
+                    fullPath += paths[i];
+                }
+                else
+                {
+                    fullPath += Path.DirectorySeparatorChar + paths[i];
+                }
+            }
+
+            return fullPath;
         }
     }
 
@@ -242,7 +293,7 @@ namespace FASTER.core
             flushedLogicalAddress = 0;
             startLogicalAddress = 0;
             finalLogicalAddress = 0;
-            guids = new Guid[LightEpoch.kTableSize+1];
+            guids = new Guid[LightEpoch.kTableSize + 1];
             continueTokens = new Dictionary<Guid, long>();
             objectLogSegmentOffsets = null;
         }
@@ -305,18 +356,18 @@ namespace FASTER.core
         /// <returns></returns>
         public bool Recover(Guid token, string checkpointDir)
         {
-            Config.CheckpointDirectory = checkpointDir;
-            return Recover(token);
+            return Recover(token, new DirectoryConfiguration(checkpointDir));
         }
 
         /// <summary>
         ///  Recover info from token
         /// </summary>
         /// <param name="token"></param>
+        /// <param name="directoryConfiguration"></param>
         /// <returns></returns>
-        internal bool Recover(Guid token)
+        internal bool Recover(Guid token, DirectoryConfiguration directoryConfiguration)
         {
-            string checkpointInfoFile = DirectoryConfiguration.GetHybridLogCheckpointMetaFileName(token);
+            string checkpointInfoFile = directoryConfiguration.GetHybridLogCheckpointMetaFileName(token);
             using (var reader = new StreamReader(checkpointInfoFile))
             {
                 Initialize(reader);
@@ -326,15 +377,15 @@ namespace FASTER.core
             for (int i = 0; i < num_threads; i++)
             {
                 var guid = guids[i];
-                using (var reader = new StreamReader(DirectoryConfiguration.GetHybridLogCheckpointContextFileName(token, guid)))
+                using (var reader = new StreamReader(directoryConfiguration.GetHybridLogCheckpointContextFileName(token, guid)))
                 {
-                    var ctx = new ExecutionContext();
+                    var ctx = new SerializedFasterExecutionContext();
                     ctx.Load(reader);
                     continueTokens.Add(ctx.guid, ctx.serialNum);
                 }
             }
 
-            if(continueTokens.Count == num_threads)
+            if (continueTokens.Count == num_threads)
             {
                 return true;
             }
@@ -365,7 +416,7 @@ namespace FASTER.core
             writer.WriteLine(startLogicalAddress);
             writer.WriteLine(finalLogicalAddress);
             writer.WriteLine(numThreads);
-            for(int i = 0; i < numThreads; i++)
+            for (int i = 0; i < numThreads; i++)
             {
                 writer.WriteLine(guids[i]);
             }
@@ -378,6 +429,25 @@ namespace FASTER.core
                 {
                     writer.WriteLine(objectLogSegmentOffsets[i]);
                 }
+            }
+        }
+
+        /// <summary>
+        /// Print checkpoint info for debugging purposes
+        /// </summary>
+        public void DebugPrint()
+        {
+            Debug.WriteLine("******** HybridLog Checkpoint Info for {0} ********", guid);
+            Debug.WriteLine("Version: {0}", version);
+            Debug.WriteLine("Is Snapshot?: {0}", useSnapshotFile == 1);
+            Debug.WriteLine("Flushed LogicalAddress: {0}", flushedLogicalAddress);
+            Debug.WriteLine("Start Logical Address: {0}", startLogicalAddress);
+            Debug.WriteLine("Final Logical Address: {0}", finalLogicalAddress);
+            Debug.WriteLine("Num sessions recovered: {0}", numThreads);
+            Debug.WriteLine("Recovered sessions: ");
+            foreach (var sessionInfo in continueTokens)
+            {
+                Debug.WriteLine("{0}: {1}", sessionInfo.Key, sessionInfo.Value);
             }
         }
     }
@@ -395,9 +465,9 @@ namespace FASTER.core
             info.Initialize(token, _version);
             started = 0;
         }
-        public void Recover(Guid token)
+        public void Recover(Guid token, DirectoryConfiguration directoryConfiguration)
         {
-            info.Recover(token);
+            info.Recover(token, directoryConfiguration);
             started = 0;
         }
         public void Reset()
@@ -453,9 +523,9 @@ namespace FASTER.core
             value = reader.ReadLine();
             finalLogicalAddress = long.Parse(value);
         }
-        public void Recover(Guid guid)
+        public void Recover(Guid guid, DirectoryConfiguration directoryConfiguration)
         {
-            string indexInfoFile = DirectoryConfiguration.GetIndexCheckpointMetaFileName(guid);
+            string indexInfoFile = directoryConfiguration.GetIndexCheckpointMetaFileName(guid);
             using (var reader = new StreamReader(indexInfoFile))
             {
                 Initialize(reader);
@@ -470,6 +540,16 @@ namespace FASTER.core
             writer.WriteLine(num_buckets);
             writer.WriteLine(startLogicalAddress);
             writer.WriteLine(finalLogicalAddress);
+        }
+        public void DebugPrint()
+        {
+            Debug.WriteLine("******** Index Checkpoint Info for {0} ********", token);
+            Debug.WriteLine("Table Size: {0}", table_size);
+            Debug.WriteLine("Main Table Size (in GB): {0}", ((double)num_ht_bytes) / 1000.0 / 1000.0 / 1000.0);
+            Debug.WriteLine("Overflow Table Size (in GB): {0}", ((double)num_ofb_bytes) / 1000.0 / 1000.0 / 1000.0);
+            Debug.WriteLine("Num Buckets: {0}", num_buckets);
+            Debug.WriteLine("Start Logical Address: {0}", startLogicalAddress);
+            Debug.WriteLine("Final Logical Address: {0}", finalLogicalAddress);
         }
         public void Reset()
         {
@@ -489,15 +569,15 @@ namespace FASTER.core
         public IDevice main_ht_device;
         public IDevice ofb_device;
 
-        public void Initialize(Guid token, long _size)
+        public void Initialize(Guid token, long _size, DirectoryConfiguration directoryConfiguration)
         {
             info.Initialize(token, _size);
-            main_ht_device = new LocalStorageDevice(DirectoryConfiguration.GetPrimaryHashTableFileName(token));
-            ofb_device = new LocalStorageDevice(DirectoryConfiguration.GetOverflowBucketsFileName(token));
+            main_ht_device = Devices.CreateLogDevice(directoryConfiguration.GetPrimaryHashTableFileName(token), false);
+            ofb_device = Devices.CreateLogDevice(directoryConfiguration.GetOverflowBucketsFileName(token), false);
         }
-        public void Recover(Guid token)
+        public void Recover(Guid token, DirectoryConfiguration directoryConfiguration)
         {
-            info.Recover(token);
+            info.Recover(token, directoryConfiguration);
         }
         public void Reset()
         {

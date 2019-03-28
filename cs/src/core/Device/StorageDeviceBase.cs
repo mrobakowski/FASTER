@@ -28,26 +28,37 @@ namespace FASTER.core
         /// </summary>
         public string FileName { get; }
 
-        /// <summary>
-        /// 
-        /// </summary>
-        public long SegmentSize { get; }
 
-        private readonly int segmentSizeBits;
-        private readonly ulong segmentSizeMask;
+        /// <summary>
+        /// Segment size
+        /// </summary>
+        protected long segmentSize;
+
+        private int segmentSizeBits;
+        private ulong segmentSizeMask;
 
         /// <summary>
         /// 
         /// </summary>
         /// <param name="filename"></param>
-        /// <param name="segmentSize"></param>
         /// <param name="sectorSize"></param>
-        public StorageDeviceBase(
-            string filename,  long segmentSize, uint sectorSize)
+        public StorageDeviceBase(string filename, uint sectorSize)
         {
-            FileName = filename;
-            SegmentSize = segmentSize;
+            FileName = filename;        
+            SectorSize = sectorSize;
 
+            segmentSize = -1;
+            segmentSizeBits = 64;
+            segmentSizeMask = ~0UL;
+        }
+
+        /// <summary>
+        /// Initialize device
+        /// </summary>
+        /// <param name="segmentSize"></param>
+        public void Initialize(long segmentSize)
+        {
+            this.segmentSize = segmentSize;
             if (!Utility.IsPowerOfTwo(segmentSize))
             {
                 if (segmentSize != -1)
@@ -60,8 +71,6 @@ namespace FASTER.core
                 segmentSizeBits = Utility.GetLogBase2((ulong)segmentSize);
                 segmentSizeMask = (ulong)segmentSize - 1;
             }
-
-            SectorSize = sectorSize;
         }
 
         /// <summary>
@@ -74,9 +83,10 @@ namespace FASTER.core
         /// <param name="asyncResult"></param>
         public void WriteAsync(IntPtr alignedSourceAddress, ulong alignedDestinationAddress, uint numBytesToWrite, IOCompletionCallback callback, IAsyncResult asyncResult)
         {
+            var segment = segmentSizeBits < 64 ? alignedDestinationAddress >> segmentSizeBits : 0;
             WriteAsync(
                 alignedSourceAddress,
-                (int)(alignedDestinationAddress >> segmentSizeBits),
+                (int)segment,
                 alignedDestinationAddress & segmentSizeMask,
                 numBytesToWrite, callback, asyncResult);
         }
@@ -91,8 +101,10 @@ namespace FASTER.core
         /// <param name="asyncResult"></param>
         public void ReadAsync(ulong alignedSourceAddress, IntPtr alignedDestinationAddress, uint aligned_read_length, IOCompletionCallback callback, IAsyncResult asyncResult)
         {
+            var segment = segmentSizeBits < 64 ? alignedSourceAddress >> segmentSizeBits : 0;
+
             ReadAsync(
-                (int)(alignedSourceAddress >> segmentSizeBits),
+                (int)segment,
                 alignedSourceAddress & segmentSizeMask,
                 alignedDestinationAddress,
                 aligned_read_length, callback, asyncResult);
@@ -105,9 +117,9 @@ namespace FASTER.core
         /// <param name="toAddress"></param>
         public void DeleteAddressRange(long fromAddress, long toAddress)
         {
-            DeleteSegmentRange(
-                (int)(fromAddress >> segmentSizeBits),
-                (int)(toAddress >> segmentSizeBits));
+            var fromSegment = segmentSizeBits < 64 ? fromAddress >> segmentSizeBits : 0;
+            var toSegment = segmentSizeBits < 64 ? toAddress >> segmentSizeBits : 0;
+            DeleteSegmentRange((int)fromSegment, (int)toSegment);
         }
 
         /// <summary>

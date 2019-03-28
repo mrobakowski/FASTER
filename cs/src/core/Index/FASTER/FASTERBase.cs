@@ -3,13 +3,11 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Runtime.CompilerServices;
-using System.Threading;
-using System.Runtime.InteropServices;
-using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace FASTER.core
 {
@@ -36,6 +34,9 @@ namespace FASTER.core
         public const int kPendingBitShift = 62;
 
         public const long kPendingBitMask = (1L << kPendingBitShift);
+
+        public const int kReadCacheBitShift = 47;
+        public const long kReadCacheBitMask = (1L << kReadCacheBitShift);
 
         public const int kTagSize = 14;
 
@@ -157,6 +158,7 @@ namespace FASTER.core
             }
         }
 
+
         public ushort Tag
         {
             get
@@ -210,6 +212,27 @@ namespace FASTER.core
                 }
             }
         }
+
+        public bool ReadCache
+        {
+            get
+            {
+                return (word & Constants.kReadCacheBitMask) != 0;
+            }
+
+            set
+            {
+                if (value)
+                {
+                    word |= Constants.kReadCacheBitMask;
+                }
+                else
+                {
+                    word &= ~Constants.kReadCacheBitMask;
+                }
+            }
+        }
+
     }
 
     internal unsafe struct InternalHashTable
@@ -260,12 +283,15 @@ namespace FASTER.core
         {
             Free(0);
             Free(1);
+            overflowBucketsAllocator.Dispose();
             return Status.OK;
         }
 
         private Status Free(int version)
         {
-            state[version].tableHandle.Free();
+            if (state[version].tableHandle.IsAllocated)
+                state[version].tableHandle.Free();
+
             state[version].tableRaw = null;
             state[version].tableAligned = null;
             return Status.OK;
@@ -353,9 +379,6 @@ namespace FASTER.core
                     if (tag == entry.Tag)
                     {
                         slot = index;
-
-                        // If (final key, return immediately)
-                        //if ((entry.tag & ~Constants.kTagMask) == 0) -- Guna: Is this correct?
                         if (!entry.Tentative)
                             return true;
                     }
@@ -377,7 +400,7 @@ namespace FASTER.core
 
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal void FindOrCreateTag(long hash, ushort tag, ref HashBucket* bucket, ref int slot, ref HashBucketEntry entry)
+        internal void FindOrCreateTag(long hash, ushort tag, ref HashBucket* bucket, ref int slot, ref HashBucketEntry entry, long BeginAddress)
         {
             var version = resizeInfo.version;
             var masked_entry_word = hash & state[version].size_mask;
@@ -387,7 +410,7 @@ namespace FASTER.core
                 bucket = state[version].tableAligned + masked_entry_word;
                 slot = Constants.kInvalidEntrySlot;
 
-                if (FindTagOrFreeInternal(hash, tag, ref bucket, ref slot, ref entry))
+                if (FindTagOrFreeInternal(hash, tag, ref bucket, ref slot, ref entry, BeginAddress))
                     return;
 
 
@@ -440,9 +463,6 @@ namespace FASTER.core
                     if (tag == entry.Tag)
                     {
                         slot = index;
-
-                        // If (final key, return immediately)
-                        //if ((entry.tag & ~Constants.kTagMask) == 0) -- Guna: Is this correct?
                         if (!entry.Tentative)
                             return true;
                     }
@@ -508,9 +528,10 @@ namespace FASTER.core
         /// <param name="bucket"></param>
         /// <param name="slot"></param>
         /// <param name="entry"></param>
+        /// <param name="BeginAddress"></param>
         /// <returns></returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool FindTagOrFreeInternal(long hash, ushort tag, ref HashBucket* bucket, ref int slot, ref HashBucketEntry entry)
+        private bool FindTagOrFreeInternal(long hash, ushort tag, ref HashBucket* bucket, ref int slot, ref HashBucketEntry entry, long BeginAddress = 0)
         {
             var target_entry_word = default(long);
             var recordExists = false;
@@ -534,6 +555,18 @@ namespace FASTER.core
                     }
 
                     entry.word = target_entry_word;
+                    if (entry.Address < BeginAddress)
+                    {
+                        if (entry.word == Interlocked.CompareExchange(ref bucket->bucket_entries[index], Constants.kInvalidAddress, target_entry_word))
+                        {
+                            if (slot == Constants.kInvalidEntrySlot)
+                            {
+                                slot = index;
+                                entry_slot_bucket = bucket;
+                            }
+                            continue;
+                        }
+                    }
                     if (tag == entry.Tag && !entry.Tentative)
                     {
                         slot = index;
@@ -705,7 +738,7 @@ namespace FASTER.core
             var table_size_ = state[version].size;
             var ptable_ = state[version].tableAligned;
             long total_record_count = 0;
-            long[] histogram = new long[14];
+            Dictionary<int, long> histogram = new Dictionary<int, long>();
 
             for (long bucket = 0; bucket < table_size_; ++bucket)
             {
@@ -724,16 +757,19 @@ namespace FASTER.core
                     if (b.bucket_entries[Constants.kOverflowBucketIndex] == 0) break;
                     b = *((HashBucket*)overflowBucketsAllocator.GetPhysicalAddress((b.bucket_entries[Constants.kOverflowBucketIndex])));
                 }
-                if (cnt < 14)
-                    histogram[cnt]++;
+
+                if (!histogram.ContainsKey(cnt)) histogram[cnt] = 0;
+                histogram[cnt]++;
             }
 
             Console.WriteLine("Number of hash buckets: {0}", table_size_);
             Console.WriteLine("Total distinct hash-table entry count: {0}", total_record_count);
+            Console.WriteLine("Average #entries per hash bucket: {0:0.00}", total_record_count / (double)table_size_);
             Console.WriteLine("Histogram of #entries per bucket: ");
-            for (int i=0; i<14; i++)
+
+            foreach (var kvp in histogram.OrderBy(e => e.Key))
             {
-                Console.WriteLine(i.ToString() + ": " + histogram[i].ToString(CultureInfo.InvariantCulture));
+                Console.WriteLine(kvp.Key.ToString() + ": " + kvp.Value.ToString(CultureInfo.InvariantCulture));
             }
         }
 

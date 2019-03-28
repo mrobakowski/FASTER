@@ -8,11 +8,8 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
-using System.Threading;
 using System.Runtime.InteropServices;
-using System.Collections.Concurrent;
-using System.Linq.Expressions;
-using System.IO;
+using System.Threading;
 
 namespace FASTER.core
 {
@@ -20,24 +17,14 @@ namespace FASTER.core
     /// Memory allocator for objects
     /// </summary>
     /// <typeparam name="T"></typeparam>
-    public unsafe class MallocFixedPageSize<T>
+    public unsafe class MallocFixedPageSize<T> : IDisposable
     {
         private const bool ForceUnpinnedAllocation = false;
-
-        /// <summary>
-        /// Static instance that returns logical addresses
-        /// </summary>
-        public static MallocFixedPageSize<T> Instance = new MallocFixedPageSize<T>();
-
-        /// <summary>
-        /// Static instance that returns physical addresses
-        /// </summary>
-        public static MallocFixedPageSize<T> PhysicalInstance = new MallocFixedPageSize<T>(true);
 
         private const int PageSizeBits = 16;
         private const int PageSize = 1 << PageSizeBits;
         private const int PageSizeMask = PageSize - 1;
-        private const int LevelSizeBits = 18;
+        private const int LevelSizeBits = 12;
         private const int LevelSize = 1 << LevelSizeBits;
         private const int LevelSizeMask = LevelSize - 1;
 
@@ -477,12 +464,16 @@ namespace FASTER.core
             uint alignedPageSize = PageSize * (uint)RecordSize;
             uint lastLevelSize = (uint)recordsCountInLastLevel * (uint)RecordSize;
 
+
+            int sectorSize = (int)device.SectorSize;
             numBytesWritten = 0;
             for (int i = 0; i < numLevels; i++)
             {
                 OverflowPagesFlushAsyncResult result = default(OverflowPagesFlushAsyncResult);
-                device.WriteAsync(pointers[i], offset + numBytesWritten, alignedPageSize, AsyncFlushCallback, result);
-                numBytesWritten += (i == numCompleteLevels) ? lastLevelSize : alignedPageSize;
+                uint writeSize = (uint)((i == numCompleteLevels) ? (lastLevelSize + (sectorSize - 1)) & ~(sectorSize - 1) : alignedPageSize);
+
+                device.WriteAsync(pointers[i], offset + numBytesWritten, writeSize, AsyncFlushCallback, result);
+                numBytesWritten += writeSize;
             }
         }
 

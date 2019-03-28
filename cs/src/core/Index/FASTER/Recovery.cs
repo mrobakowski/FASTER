@@ -9,6 +9,8 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Linq;
+using System.Collections.Generic;
 
 namespace FASTER.core
 {
@@ -50,49 +52,145 @@ namespace FASTER.core
     /// <summary>
     /// Partial class for recovery code in FASTER
     /// </summary>
-    public unsafe partial class FasterKV
+    public unsafe partial class FasterKV<Key, Value, Input, Output, Context, Functions> : FasterBase, IFasterKV<Key, Value, Input, Output, Context>
+        where Key : new()
+        where Value : new()
+        where Functions : IFunctions<Key, Value, Input, Output, Context>
     {
+
+        private void InternalRecoverFromLatestCheckpoints()
+        {
+            var indexCheckpointDir = new DirectoryInfo(directoryConfiguration.GetIndexCheckpointFolder());
+            var dirs = indexCheckpointDir.GetDirectories();
+            foreach(var dir in dirs)
+            {
+                // Remove incomplete checkpoints
+                if(!File.Exists(dir.FullName + Path.DirectorySeparatorChar + "completed.dat")) 
+                {
+                    Directory.Delete(dir.FullName, true);
+                }
+            }
+            var latestICFolder = indexCheckpointDir.GetDirectories().OrderByDescending(f => f.LastWriteTime).First();
+            if(latestICFolder == null || !Guid.TryParse(latestICFolder.Name, out Guid indexCheckpointGuid))
+            {
+                throw new Exception("No valid index checkpoint to recover from");
+            }
+            
+
+            var hlogCheckpointDir = new DirectoryInfo(directoryConfiguration.GetHybridLogCheckpointFolder());
+            dirs = hlogCheckpointDir.GetDirectories();
+            foreach (var dir in dirs)
+            {
+                // Remove incomplete checkpoints
+                if (!File.Exists(dir.FullName + Path.DirectorySeparatorChar + "completed.dat"))
+                {
+                    Directory.Delete(dir.FullName, true);
+                }
+            }
+            var latestHLCFolder = hlogCheckpointDir.GetDirectories().OrderByDescending(f => f.LastWriteTime).First();
+            if (latestHLCFolder == null || !Guid.TryParse(latestHLCFolder.Name, out Guid hybridLogCheckpointGuid))
+            {
+                throw new Exception("No valid hybrid log checkpoint to recover from");
+            }
+
+            InternalRecover(indexCheckpointGuid, hybridLogCheckpointGuid);
+        }
+
+        private bool IsCheckpointSafe(Guid token, CheckpointType checkpointType)
+        {
+            switch (checkpointType)
+            {
+                case CheckpointType.INDEX_ONLY:
+                    {
+                        var dir = new DirectoryInfo(directoryConfiguration.GetIndexCheckpointFolder(token));
+                        return File.Exists(dir.FullName + Path.DirectorySeparatorChar + "completed.dat");
+                    }
+                case CheckpointType.HYBRID_LOG_ONLY:
+                    {
+                        var dir = new DirectoryInfo(directoryConfiguration.GetHybridLogCheckpointFolder(token));
+                        return File.Exists(dir.FullName + Path.DirectorySeparatorChar + "completed.dat");
+                    }
+                case CheckpointType.FULL:
+                    {
+                        return IsCheckpointSafe(token, CheckpointType.INDEX_ONLY)
+                            && IsCheckpointSafe(token, CheckpointType.HYBRID_LOG_ONLY);
+                    }
+                default:
+                    return false;
+            }
+        }
+
+        private bool IsCompatible(IndexRecoveryInfo indexInfo, HybridLogRecoveryInfo recoveryInfo)
+        {
+            var l1 = indexInfo.finalLogicalAddress;
+            var l2 = recoveryInfo.finalLogicalAddress;
+            return l1 <= l2;
+        }
+
         private void InternalRecover(Guid indexToken, Guid hybridLogToken)
         {
-            _indexCheckpoint.Recover(indexToken);
-            _hybridLogCheckpoint.Recover(hybridLogToken);
+            Debug.WriteLine("********* Primary Recovery Information ********");
+            Debug.WriteLine("Index Checkpoint: {0}", indexToken);
+            Debug.WriteLine("HybridLog Checkpoint: {0}", hybridLogToken);
 
-            // Recover segment offsets for object log
-            if (_hybridLogCheckpoint.info.objectLogSegmentOffsets != null)
-                Array.Copy(_hybridLogCheckpoint.info.objectLogSegmentOffsets, hlog.segmentOffsets, _hybridLogCheckpoint.info.objectLogSegmentOffsets.Length);
+            // Assert corresponding checkpoints are safe to recover from
+            Debug.Assert(IsCheckpointSafe(indexToken, CheckpointType.INDEX_ONLY), 
+                "Cannot recover from incomplete index checkpoint " + indexToken.ToString());
 
-            _indexCheckpoint.main_ht_device = new LocalStorageDevice(DirectoryConfiguration.GetPrimaryHashTableFileName(_indexCheckpoint.info.token));
-            _indexCheckpoint.ofb_device = new LocalStorageDevice(DirectoryConfiguration.GetOverflowBucketsFileName(_indexCheckpoint.info.token));
+            Debug.Assert(IsCheckpointSafe(hybridLogToken, CheckpointType.HYBRID_LOG_ONLY), 
+                "Cannot recover from incomplete hybrid log checkpoint " + hybridLogToken.ToString());
 
-            var l1 = _indexCheckpoint.info.finalLogicalAddress;
-            var l2 = _hybridLogCheckpoint.info.finalLogicalAddress;
-            var v = _hybridLogCheckpoint.info.version;
-            if (l1 > l2)
+            // Recovery appropriate context information
+            var recoveredICInfo = new IndexCheckpointInfo();
+            recoveredICInfo.Recover(indexToken, directoryConfiguration);
+            recoveredICInfo.info.DebugPrint();
+
+            var recoveredHLCInfo = new HybridLogCheckpointInfo();
+            recoveredHLCInfo.Recover(hybridLogToken, directoryConfiguration);
+            recoveredHLCInfo.info.DebugPrint();
+
+            // Check if the two checkpoints are compatible for recovery
+            if(!IsCompatible(recoveredICInfo.info, recoveredHLCInfo.info))
             {
                 throw new Exception("Cannot recover from (" + indexToken.ToString() + "," + hybridLogToken.ToString() + ") checkpoint pair!\n");
             }
 
+            // Set new system state after recovery
+            var v = recoveredHLCInfo.info.version;
             _systemState.phase = Phase.REST;
             _systemState.version = (v + 1);
 
-            RecoverFuzzyIndex(_indexCheckpoint);
+            // Recover fuzzy index from checkpoint
+            RecoverFuzzyIndex(recoveredICInfo);
 
-            IsFuzzyIndexRecoveryComplete(true);
+            // Recover segment offsets for object log
+            if (recoveredHLCInfo.info.objectLogSegmentOffsets != null)
+                Array.Copy(recoveredHLCInfo.info.objectLogSegmentOffsets,
+                    hlog.GetSegmentOffsets(),
+                    recoveredHLCInfo.info.objectLogSegmentOffsets.Length);
 
-            DeleteTentativeEntries();
 
+            // Make index consistent for version v
             if (FoldOverSnapshot)
             {
-                RecoverHybridLog(_indexCheckpoint.info, _hybridLogCheckpoint.info);
+                RecoverHybridLog(recoveredICInfo.info, recoveredHLCInfo.info);
             }
             else
             {
-                RecoverHybridLogFromSnapshotFile(_indexCheckpoint.info, _hybridLogCheckpoint.info);
+                RecoverHybridLogFromSnapshotFile(recoveredICInfo.info, recoveredHLCInfo.info);
             }
+            
 
-            _indexCheckpoint.Reset();
+            // Read appropriate hybrid log pages into memory
+            RestoreHybridLog(recoveredHLCInfo.info.finalLogicalAddress);
 
-            RestoreHybridLog(_hybridLogCheckpoint.info.finalLogicalAddress);
+            // Recover session information
+            _recoveredSessions = new SafeConcurrentDictionary<Guid, long>();
+            foreach(var sessionInfo in recoveredHLCInfo.info.continueTokens)
+            {
+                
+                _recoveredSessions.GetOrAdd(sessionInfo.Key, sessionInfo.Value);
+            }
         }
 
         private void RestoreHybridLog(long untilAddress)
@@ -142,10 +240,6 @@ namespace FASTER.core
             }
 
             var headAddress = hlog.GetStartLogicalAddress(headPage);
-            if (headAddress == 0)
-            {
-                headAddress = Constants.kFirstValidAddress;
-            }
             hlog.RecoveryReset(untilAddress, headAddress);
         }
 
@@ -172,7 +266,7 @@ namespace FASTER.core
 
             // Issue request to read pages as much as possible
             hlog.AsyncReadPagesFromDevice(startPage, numPagesToReadFirst, AsyncReadPagesCallbackForRecovery, recoveryStatus);
-
+           
             for (long page = startPage; page < endPage; page++)
             {
                 // Ensure page has been read into memory
@@ -196,7 +290,7 @@ namespace FASTER.core
                 {
                     pageUntilAddress = hlog.GetOffsetInPage(untilAddress);
                 }
-
+                
                 var physicalAddress = hlog.GetPhysicalAddress(startLogicalAddress);
                 RecoverFromPage(fromAddress, pageFromAddress, pageUntilAddress,
                                 startLogicalAddress, physicalAddress, recoveryInfo.version);
@@ -245,10 +339,14 @@ namespace FASTER.core
 
             // By default first page has one extra record
             var capacity = hlog.GetCapacityNumPages();
+            var recoveryDevice = Devices.CreateLogDevice(directoryConfiguration.GetHybridLogCheckpointFileName(recoveryInfo.guid), false);
+            var objectLogRecoveryDevice = Devices.CreateLogDevice(directoryConfiguration.GetHybridLogObjectCheckpointFileName(recoveryInfo.guid), false);
+            recoveryDevice.Initialize(hlog.GetSegmentSize());
+            objectLogRecoveryDevice.Initialize(hlog.GetSegmentSize());
             var recoveryStatus = new RecoveryStatus(capacity, startPage, endPage)
             {
-                recoveryDevice = FasterFactory.CreateLogDevice(DirectoryConfiguration.GetHybridLogCheckpointFileName(recoveryInfo.guid)),
-                objectLogRecoveryDevice = FasterFactory.CreateObjectLogDevice(DirectoryConfiguration.GetHybridLogCheckpointFileName(recoveryInfo.guid)),
+                recoveryDevice = recoveryDevice,
+                objectLogRecoveryDevice = objectLogRecoveryDevice,
                 recoveryDevicePageOffset = startPage
             };
 
@@ -342,10 +440,8 @@ namespace FASTER.core
                                      long pagePhysicalAddress,
                                      int version)
         {
-            var key = default(Key*);
             var hash = default(long);
             var tag = default(ushort);
-            var info = default(RecordInfo*);
             var pointer = default(long);
             var recordStart = default(long);
             var bucket = default(HashBucket*);
@@ -356,24 +452,23 @@ namespace FASTER.core
             while (pointer < untilLogicalAddressInPage)
             {
                 recordStart = pagePhysicalAddress + pointer;
-                info = Layout.GetInfo(recordStart);
+                ref RecordInfo info = ref hlog.GetInfo(recordStart);
 
-                if (info->IsNull())
+                if (info.IsNull())
                 {
                     pointer += RecordInfo.GetLength();
                     continue;
                 }
 
-                if (!info->Invalid)
+                if (!info.Invalid)
                 {
-                    key = Layout.GetKey(recordStart);
-                    hash = Key.GetHashCode(key);
+                    hash = comparer.GetHashCode64(ref hlog.GetKey(recordStart));
                     tag = (ushort)((ulong)hash >> Constants.kHashTagShift);
 
                     entry = default(HashBucketEntry);
-                    FindOrCreateTag(hash, tag, ref bucket, ref slot, ref entry);
+                    FindOrCreateTag(hash, tag, ref bucket, ref slot, ref entry, hlog.BeginAddress);
 
-                    if (info->Version <= version)
+                    if (info.Version <= version)
                     {
                         entry.Address = pageLogicalAddress + pointer;
                         entry.Tag = tag;
@@ -383,10 +478,10 @@ namespace FASTER.core
                     }
                     else
                     {
-                        info->Invalid = true;
-                        if (info->PreviousAddress < startRecoveryAddress)
+                        info.Invalid = true;
+                        if (info.PreviousAddress < startRecoveryAddress)
                         {
-                            entry.Address = info->PreviousAddress;
+                            entry.Address = info.PreviousAddress;
                             entry.Tag = tag;
                             entry.Pending = false;
                             entry.Tentative = false;
@@ -394,7 +489,7 @@ namespace FASTER.core
                         }
                     }
                 }
-                pointer += Layout.GetPhysicalSize(recordStart);
+                pointer += hlog.GetRecordSize(recordStart);
             }
         }
 
@@ -408,6 +503,11 @@ namespace FASTER.core
             // Set the page status to flushed
             var result = (PageAsyncReadResult<RecoveryStatus>)Overlapped.Unpack(overlap).AsyncResult;
 
+            if (result.freeBuffer1 != null)
+            {
+                hlog.PopulatePage(result.freeBuffer1.GetValidPointer(), result.freeBuffer1.required_bytes, result.page);
+                result.freeBuffer1.Return();
+            }
             int index = hlog.GetPageIndexForPage(result.page);
             result.context.readStatus[index] = ReadStatus.Done;
             Interlocked.MemoryBarrier();

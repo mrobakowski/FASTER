@@ -3,27 +3,23 @@
   <metadata>
     <id>FASTER.Debug</id>
     <version>$version$</version>
-    <title>FASTER</title>
-    <authors>FASTER</authors>
+    <title>FASTER.Debug</title>
+    <authors>Microsoft</authors>
     <owners>Microsoft</owners>
     <projectUrl>https://github.com/Microsoft/FASTER</projectUrl>
     <licenseUrl>https://raw.githubusercontent.com/Microsoft/FASTER/master/LICENSE</licenseUrl>
     <requireLicenseAcceptance>true</requireLicenseAcceptance>
     <description>Debug version. FASTER is a fast concurrent key-value store that also supports indexing of larger-than-memory data</description>
     <releaseNotes>See the project website at https://github.com/Microsoft/FASTER for more details</releaseNotes>
-    <copyright>Copyright 2018</copyright>
+    <copyright>© Microsoft Corporation. All rights reserved.</copyright>
+    <language>en-US</language>
     <tags>key-value store dictionary hashtable concurrent log persistent</tags>
     <dependencies>
       <group targetFramework="net46">
-        <dependency id="Microsoft.CodeAnalysis.CSharp.Scripting" version="2.8.2" />
-        <dependency id="System.Reflection.Emit.ILGeneration" version="4.3.0" />
-        <dependency id="System.Runtime.CompilerServices.Unsafe" version="4.5.1" />
+        <dependency id="System.Runtime.CompilerServices.Unsafe" version="4.5.2" />
       </group>
       <group targetFramework="netstandard2.0">
-        <dependency id="Microsoft.CodeAnalysis.CSharp.Scripting" version="2.8.2" />
-        <dependency id="System.Reflection.Emit.ILGeneration" version="4.3.0" />
-        <dependency id="System.Runtime.CompilerServices.Unsafe" version="4.5.1" />
-        <dependency id="System.Runtime.Loader" version="4.3.0" />
+        <dependency id="System.Runtime.CompilerServices.Unsafe" version="4.5.2" />
       </group>
     </dependencies>
   </metadata>
