@@ -52,10 +52,8 @@ static constexpr uint64_t kMaxKey = 268435456;
 static constexpr uint64_t kRunSeconds = 360;
 static constexpr uint64_t kCheckpointSeconds = 30;
 
-aligned_unique_ptr_t<uint64_t> init_keys_;
-aligned_unique_ptr_t<uint64_t> txn_keys_;
-aligned_unique_ptr_t<uint8_t> init_file_;
-aligned_unique_ptr_t<uint8_t> txn_file_;
+aligned_unique_ptr_t<uint8_t> init_keys_;
+aligned_unique_ptr_t<uint8_t> txn_keys_;
 std::atomic<uint64_t> idx_{ 0 };
 std::atomic<bool> done_{ false };
 std::atomic<uint64_t> total_duration_{ 0 };
@@ -76,18 +74,18 @@ inline Op ycsb_rmw_100(std::mt19937& rng) {
 
 void read_cb(void* target, const uint8_t* buffer, uint64_t length, faster_status status) {
   assert(status == Ok);
+  assert(buffer[0] == 42);
 }
 
 uint64_t rmw_cb(const uint8_t* current, uint64_t length, uint8_t* modification, uint64_t modification_length, uint8_t* dst) {
-  assert(length == 1);
-  assert(modification_length == 1);
+  assert(length == 8);
+  assert(modification_length == 8);
   if (dst != NULL) {
-    uint8_t* val = new uint8_t[1];
+    uint8_t val[8];
     val[0] = {static_cast<uint8_t>(current[0] + modification[0])};
-    memcpy(dst, val, 1);
-    free(val);
+    memcpy(dst, val, 8);
   }
-  return 1;
+  return 8;
 }
 
 extern "C" {
@@ -165,80 +163,19 @@ void SetThreadAffinity(size_t core) {
 void load_files(const std::string& load_filename, const std::string& run_filename) {
   constexpr size_t kFileChunkSize = 131072;
 
-  auto chunk_guard = alloc_aligned<uint64_t>(512, kFileChunkSize);
-  uint64_t* chunk = chunk_guard.get();
-
-  FASTER::benchmark::File init_file{ load_filename };
-
-  printf("loading keys from %s into memory...\n", load_filename.c_str());
-
-  init_keys_ = alloc_aligned<uint64_t>(64, kInitCount * sizeof(uint64_t));
-  uint64_t count = 0;
-
-  uint64_t offset = 0;
-  while(true) {
-    uint64_t size = init_file.Read(chunk, kFileChunkSize, offset);
-    for(uint64_t idx = 0; idx < size / 8; ++idx) {
-      init_keys_.get()[count] = chunk[idx];
-      ++count;
-    }
-    if(size == kFileChunkSize) {
-      offset += kFileChunkSize;
-    } else {
-      break;
-    }
-  }
-  if(kInitCount != count) {
-    printf("Init file load fail!\n");
-    exit(1);
-  }
-
-  printf("loaded %" PRIu64 " keys.\n", count);
-
-  FASTER::benchmark::File txn_file{ run_filename };
-
-  printf("loading txns from %s into memory...\n", run_filename.c_str());
-
-  txn_keys_ = alloc_aligned<uint64_t>(64, kTxnCount * sizeof(uint64_t));
-
-  count = 0;
-  offset = 0;
-
-  while(true) {
-    uint64_t size = txn_file.Read(chunk, kFileChunkSize, offset);
-    for(uint64_t idx = 0; idx < size / 8; ++idx) {
-      txn_keys_.get()[count] = chunk[idx];
-      ++count;
-    }
-    if(size == kFileChunkSize) {
-      offset += kFileChunkSize;
-    } else {
-      break;
-    }
-  }
-  if(kTxnCount != count) {
-    printf("Txn file load fail!\n");
-    exit(1);
-  }
-  printf("loaded %" PRIu64 " txns.\n", count);
-}
-
-void load_files2(const std::string& load_filename, const std::string& run_filename) {
-  constexpr size_t kFileChunkSize = 131072;
-
   auto chunk_guard = alloc_aligned<uint8_t>(512, kFileChunkSize);
   uint8_t* chunk = chunk_guard.get();
 
   FASTER::benchmark::File init_file{ load_filename };
   printf("loading keys from %s into memory...\n", load_filename.c_str());
 
-  init_file_ = alloc_aligned<uint8_t>(64, kInitCount * sizeof(uint64_t));
+  init_keys_ = alloc_aligned<uint8_t>(64, kInitCount * sizeof(uint64_t));
   uint64_t count = 0;
   uint64_t offset = 0;
   while(true) {
     uint64_t size = init_file.Read(chunk, kFileChunkSize, offset);
     for(uint64_t idx = 0; idx < size; ++idx) {
-      init_file_.get()[count] = chunk[idx];
+      init_keys_.get()[count] = chunk[idx];
       ++count;
     }
     if(size == kFileChunkSize) {
@@ -258,7 +195,7 @@ void load_files2(const std::string& load_filename, const std::string& run_filena
 
   printf("loading txns from %s into memory...\n", run_filename.c_str());
 
-  txn_file_ = alloc_aligned<uint8_t>(64, kTxnCount * sizeof(uint64_t));
+  txn_keys_ = alloc_aligned<uint8_t>(64, kTxnCount * sizeof(uint64_t));
 
   count = 0;
   offset = 0;
@@ -266,7 +203,7 @@ void load_files2(const std::string& load_filename, const std::string& run_filena
   while(true) {
     uint64_t size = txn_file.Read(chunk, kFileChunkSize, offset);
     for(uint64_t idx = 0; idx < size; ++idx) {
-      txn_file_.get()[count] = chunk[idx];
+      txn_keys_.get()[count] = chunk[idx];
       ++count;
     }
     if(size == kFileChunkSize) {
@@ -338,7 +275,7 @@ void thread_run_benchmark(faster_t* store, size_t thread_idx) {
 
   auto start_time = std::chrono::high_resolution_clock::now();
 
-  uint8_t upsert_value = 0;
+  uint8_t upsert_value = 42;
   int64_t reads_done = 0;
   int64_t writes_done = 0;
 
@@ -346,13 +283,13 @@ void thread_run_benchmark(faster_t* store, size_t thread_idx) {
 
   while(!done_) {
     uint64_t chunk_idx = idx_.fetch_add(kChunkSize);
-    while(chunk_idx >= kTxnCount) {
+    while(chunk_idx >= kTxnCount * 8) {
       if(chunk_idx == kTxnCount) {
         idx_ = 0;
       }
       chunk_idx = idx_.fetch_add(kChunkSize);
     }
-    for(uint64_t idx = chunk_idx; idx < chunk_idx + kChunkSize; ++idx) {
+    for(uint64_t idx = chunk_idx; idx < chunk_idx + kChunkSize; idx += 8) {
       if(idx % kRefreshInterval == 0) {
         faster_refresh_session(store);
         if(idx % kCompletePendingInterval == 0) {
@@ -362,7 +299,7 @@ void thread_run_benchmark(faster_t* store, size_t thread_idx) {
       switch(FN(rng)) {
       case Op::Insert:
       case Op::Upsert: {
-        uint8_t* val = new uint8_t[1];
+        uint8_t val[8];
         val[0] = upsert_value;
         uint8_t* key = new uint8_t[8];
         memcpy(key, &txn_keys_.get()[idx], 8);
@@ -382,11 +319,9 @@ void thread_run_benchmark(faster_t* store, size_t thread_idx) {
         break;
       }
       case Op::ReadModifyWrite:
-        uint8_t* modification = new uint8_t[1];
+        uint8_t modification[8];
         modification[0] = 0;
-        uint8_t* key = new uint8_t[8];
-        memcpy(key, &txn_keys_.get()[idx], 8);
-        uint8_t result = faster_rmw(store, key, 8, modification, 1, 1, rmw_cb);
+        uint8_t result = faster_rmw(store, &txn_keys_.get()[idx], 8, modification, 8, 1, rmw_cb);
         if(result == 0) {
           ++writes_done;
         }
@@ -520,7 +455,7 @@ int main(int argc, char* argv[]) {
   std::string load_filename{ argv[3] };
   std::string run_filename{ argv[4] };
 
-  load_files2(load_filename, run_filename);
+  load_files(load_filename, run_filename);
 
   run(workload, num_threads);
 
