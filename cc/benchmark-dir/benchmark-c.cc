@@ -37,12 +37,12 @@ enum class Workload {
 
 static constexpr uint64_t kInitCount = 250000000;
 static constexpr uint64_t kTxnCount = 1000000000;
-static constexpr uint64_t kChunkSize = 3200;
+static constexpr uint64_t kChunkSize = 3200 * 8;
 static constexpr uint64_t kRefreshInterval = 64;
 static constexpr uint64_t kCompletePendingInterval = 1600;
 
-static_assert(kInitCount % kChunkSize == 0, "kInitCount % kChunkSize != 0");
-static_assert(kTxnCount % kChunkSize == 0, "kTxnCount % kChunkSize != 0");
+static_assert(kInitCount * 8 % kChunkSize == 0, "kInitCount % kChunkSize != 0");
+static_assert(kTxnCount * 8 % kChunkSize == 0, "kTxnCount % kChunkSize != 0");
 static_assert(kCompletePendingInterval % kRefreshInterval == 0,
               "kCompletePendingInterval % kRefreshInterval != 0");
 
@@ -54,6 +54,8 @@ static constexpr uint64_t kCheckpointSeconds = 30;
 
 aligned_unique_ptr_t<uint64_t> init_keys_;
 aligned_unique_ptr_t<uint64_t> txn_keys_;
+aligned_unique_ptr_t<uint8_t> init_file_;
+aligned_unique_ptr_t<uint8_t> txn_file_;
 std::atomic<uint64_t> idx_{ 0 };
 std::atomic<bool> done_{ false };
 std::atomic<uint64_t> total_duration_{ 0 };
@@ -221,15 +223,74 @@ void load_files(const std::string& load_filename, const std::string& run_filenam
   printf("loaded %" PRIu64 " txns.\n", count);
 }
 
+void load_files2(const std::string& load_filename, const std::string& run_filename) {
+  constexpr size_t kFileChunkSize = 131072;
+
+  auto chunk_guard = alloc_aligned<uint8_t>(512, kFileChunkSize);
+  uint8_t* chunk = chunk_guard.get();
+
+  FASTER::benchmark::File init_file{ load_filename };
+  printf("loading keys from %s into memory...\n", load_filename.c_str());
+
+  init_file_ = alloc_aligned<uint8_t>(64, kInitCount * sizeof(uint64_t));
+  uint64_t count = 0;
+  uint64_t offset = 0;
+  while(true) {
+    uint64_t size = init_file.Read(chunk, kFileChunkSize, offset);
+    for(uint64_t idx = 0; idx < size; ++idx) {
+      init_file_.get()[count] = chunk[idx];
+      ++count;
+    }
+    if(size == kFileChunkSize) {
+      offset += kFileChunkSize;
+    } else {
+      break;
+    }
+  }
+  if(kInitCount != count / 8) {
+    printf("Init file load fail!\n");
+    exit(1);
+  }
+
+  printf("loaded %" PRIu64 " keys.\n", count / 8);
+
+  FASTER::benchmark::File txn_file{ run_filename };
+
+  printf("loading txns from %s into memory...\n", run_filename.c_str());
+
+  txn_file_ = alloc_aligned<uint8_t>(64, kTxnCount * sizeof(uint64_t));
+
+  count = 0;
+  offset = 0;
+
+  while(true) {
+    uint64_t size = txn_file.Read(chunk, kFileChunkSize, offset);
+    for(uint64_t idx = 0; idx < size; ++idx) {
+      txn_file_.get()[count] = chunk[idx];
+      ++count;
+    }
+    if(size == kFileChunkSize) {
+      offset += kFileChunkSize;
+    } else {
+      break;
+    }
+  }
+  if(kTxnCount != count / 8) {
+    printf("Txn file load fail!\n");
+    exit(1);
+  }
+  printf("loaded %" PRIu64 " txns.\n", count / 8);
+}
+
 void thread_setup_store(faster_t* store, size_t thread_idx) {
   SetThreadAffinity(thread_idx);
 
   const char* guid = faster_start_session(store);
 
   uint8_t value = 42;
-  for(uint64_t chunk_idx = idx_.fetch_add(kChunkSize); chunk_idx < kInitCount;
+  for(uint64_t chunk_idx = idx_.fetch_add(kChunkSize); chunk_idx < kInitCount * 8;
       chunk_idx = idx_.fetch_add(kChunkSize)) {
-    for(uint64_t idx = chunk_idx; idx < chunk_idx + kChunkSize; ++idx) {
+    for(uint64_t idx = chunk_idx; idx < chunk_idx + kChunkSize; idx += 8) {
       if(idx % kRefreshInterval == 0) {
           faster_refresh_session(store);
         if(idx % kCompletePendingInterval == 0) {
@@ -459,7 +520,7 @@ int main(int argc, char* argv[]) {
   std::string load_filename{ argv[3] };
   std::string run_filename{ argv[4] };
 
-  load_files(load_filename, run_filename);
+  load_files2(load_filename, run_filename);
 
   run(workload, num_threads);
 
