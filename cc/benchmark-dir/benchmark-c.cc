@@ -354,26 +354,14 @@ void run_benchmark(faster_t* store, size_t num_threads) {
     threads.emplace_back(&thread_run_benchmark<FN>, store, thread_idx);
   }
 
-  static std::atomic<uint64_t> num_checkpoints;
-  num_checkpoints = 0;
+  uint64_t num_checkpoints = 0;
 
   if(kCheckpointSeconds == 0) {
     std::this_thread::sleep_for(std::chrono::seconds(kRunSeconds));
   } else {
-    auto callback = [](Status result, uint64_t persistent_serial_num) {
-      if(result != Status::Ok) {
-        printf("Thread %" PRIu32 " reports checkpoint failed.\n",
-               Thread::id());
-      } else {
-        ++num_checkpoints;
-      }
-    };
-
     auto start_time = std::chrono::high_resolution_clock::now();
     auto last_checkpoint_time = start_time;
     auto current_time = start_time;
-
-    uint64_t checkpoint_num = 0;
 
     while(current_time - start_time < std::chrono::seconds(kRunSeconds)) {
       std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -382,8 +370,8 @@ void run_benchmark(faster_t* store, size_t num_threads) {
         Guid token;
         faster_checkpoint_result* result = faster_checkpoint(store);
         if(result->checked) {
-          printf("Starting checkpoint %" PRIu64 ".\n", checkpoint_num);
-          ++checkpoint_num;
+          printf("Starting checkpoint %" PRIu64 ".\n", num_checkpoints);
+          ++num_checkpoints;
         } else {
           printf("Failed to start checkpoint.\n");
         }
@@ -401,7 +389,7 @@ void run_benchmark(faster_t* store, size_t num_threads) {
   }
 
   printf("Finished benchmark: %" PRIu64 " thread checkpoints completed;  %.2f ops/second/thread\n",
-         num_checkpoints.load(),
+         num_checkpoints,
          ((double)total_reads_done_ + (double)total_writes_done_) / ((double)total_duration_ /
              kNanosPerSecond));
 }
