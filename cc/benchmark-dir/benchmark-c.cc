@@ -449,8 +449,8 @@ int main(int argc, char* argv[]) {
     std::experimental::filesystem::remove_all("storage");
     results_[num_threads] = result;
   }
-  for( auto const& [key, val] : results_ ) {
-    printf("%d threads %.2f ops/second/thread\n", key, val);
+  for( auto const& x : results_ ) {
+    printf("%d threads %.2f ops/second/thread\n", x.first, x.second);
   }
 
 
