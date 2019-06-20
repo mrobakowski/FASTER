@@ -33,6 +33,8 @@ enum class Op : uint8_t {
 enum class Workload {
   A_50_50 = 0,
   RMW_100 = 1,
+  UPSERT_100 = 2,
+  READ_100 = 3,
 };
 
 static constexpr uint64_t kInitCount = 250000000;
@@ -272,6 +274,14 @@ inline Op ycsb_a_50_50(std::mt19937& rng) {
 
 inline Op ycsb_rmw_100(std::mt19937& rng) {
   return Op::ReadModifyWrite;
+}
+
+inline Op ycsb_upsert_100(std::mt19937& rng) {
+  return Op::Upsert;
+}
+
+inline Op ycsb_read_100(std::mt19937& rng) {
+  return Op::Read;
 }
 
 /// Affinitize to hardware threads on the same core first, before
@@ -582,6 +592,12 @@ int main(int argc, char* argv[]) {
       break;
     case Workload::RMW_100:
       result = run_benchmark<ycsb_rmw_100>(&store, num_benchmark_threads);
+      break;
+    case Workload::UPSERT_100:
+      result = run_benchmark<ycsb_upsert_100>(&store, num_threads);
+      break;
+    case Workload::READ_100:
+      result = run_benchmark<ycsb_read_100>(&store, num_threads);
       break;
     default:
       printf("Unknown workload!\n");
