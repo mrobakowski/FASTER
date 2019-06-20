@@ -114,49 +114,6 @@ void SetThreadAffinity(size_t core) {
   //                                    CPU 1, Core 0 assigned to 1, 29; etc.
   cpu_set_t mask;
   CPU_ZERO(&mask);
-#ifdef NUMA
-  switch(core % 4) {
-  case 0:
-    // 0 |-> 0
-    // 4 |-> 2
-    // 8 |-> 4
-    core = core / 2;
-    break;
-  case 1:
-    // 1 |-> 28
-    // 5 |-> 30
-    // 9 |-> 32
-    core = kCoreCount + (core - 1) / 2;
-    break;
-  case 2:
-    // 2  |-> 1
-    // 6  |-> 3
-    // 10 |-> 5
-    core = core / 2;
-    break;
-  case 3:
-    // 3  |-> 29
-    // 7  |-> 31
-    // 11 |-> 33
-    core = kCoreCount + (core - 1) / 2;
-    break;
-  }
-#else
-  switch(core % 2) {
-  case 0:
-    // 0 |-> 0
-    // 2 |-> 2
-    // 4 |-> 4
-    core = core;
-    break;
-  case 1:
-    // 1 |-> 28
-    // 3 |-> 30
-    // 5 |-> 32
-    core = (core - 1) + kCoreCount;
-    break;
-  }
-#endif
   CPU_SET(core, &mask);
 
   ::sched_setaffinity(0, sizeof(mask), &mask);
