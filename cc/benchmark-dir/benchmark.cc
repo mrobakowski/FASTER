@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <random>
 #include <string>
+#include <map>
+#include <experimental/filesystem>
 
 #include "file.h"
 
@@ -53,10 +55,12 @@ static constexpr uint64_t kCheckpointSeconds = 30;
 aligned_unique_ptr_t<uint64_t> init_keys_;
 aligned_unique_ptr_t<uint64_t> txn_keys_;
 std::atomic<uint64_t> idx_{ 0 };
-std::atomic<bool> done_{ false };
+std::atomic<size_t> threads_waiting_{ 0 };
 std::atomic<uint64_t> total_duration_{ 0 };
 std::atomic<uint64_t> total_reads_done_{ 0 };
 std::atomic<uint64_t> total_writes_done_{ 0 };
+
+std::map<size_t, double> results_;
 
 class ReadContext;
 class UpsertContext;
@@ -287,49 +291,6 @@ void SetThreadAffinity(size_t core) {
   //                                    CPU 1, Core 0 assigned to 1, 29; etc.
   cpu_set_t mask;
   CPU_ZERO(&mask);
-#ifdef NUMA
-  switch(core % 4) {
-  case 0:
-    // 0 |-> 0
-    // 4 |-> 2
-    // 8 |-> 4
-    core = core / 2;
-    break;
-  case 1:
-    // 1 |-> 28
-    // 5 |-> 30
-    // 9 |-> 32
-    core = kCoreCount + (core - 1) / 2;
-    break;
-  case 2:
-    // 2  |-> 1
-    // 6  |-> 3
-    // 10 |-> 5
-    core = core / 2;
-    break;
-  case 3:
-    // 3  |-> 29
-    // 7  |-> 31
-    // 11 |-> 33
-    core = kCoreCount + (core - 1) / 2;
-    break;
-  }
-#else
-  switch(core % 2) {
-  case 0:
-    // 0 |-> 0
-    // 2 |-> 2
-    // 4 |-> 4
-    core = core;
-    break;
-  case 1:
-    // 1 |-> 28
-    // 3 |-> 30
-    // 5 |-> 32
-    core = (core - 1) + kCoreCount;
-    break;
-  }
-#endif
   CPU_SET(core, &mask);
 
   ::sched_setaffinity(0, sizeof(mask), &mask);
@@ -418,7 +379,7 @@ void thread_setup_store(store_t* store, size_t thread_idx) {
       }
 
       UpsertContext context{ init_keys_.get()[idx], value };
-      store->Upsert(context, callback, 1);
+      store->Upsert(context, callback, idx);
     }
   }
 
@@ -436,14 +397,9 @@ void setup_store(store_t* store, size_t num_threads) {
     thread.join();
   }
 
-  init_keys_.reset();
-
   printf("Finished populating store: contains ?? elements.\n");
 }
 
-
-static std::atomic<int64_t> async_reads_done{ 0 };
-static std::atomic<int64_t> async_writes_done{ 0 };
 
 template <Op(*FN)(std::mt19937&)>
 void thread_run_benchmark(store_t* store, size_t thread_idx) {
@@ -460,13 +416,11 @@ void thread_run_benchmark(store_t* store, size_t thread_idx) {
 
   Guid guid = store->StartSession();
 
-  while(!done_) {
+  while(true) {
     uint64_t chunk_idx = idx_.fetch_add(kChunkSize);
-    while(chunk_idx >= kTxnCount) {
-      if(chunk_idx == kTxnCount) {
-        idx_ = 0;
-      }
-      chunk_idx = idx_.fetch_add(kChunkSize);
+    if(chunk_idx >= kTxnCount) {
+      threads_waiting_.fetch_sub(1);
+      break;
     }
     for(uint64_t idx = chunk_idx; idx < chunk_idx + kChunkSize; ++idx) {
       if(idx % kRefreshInterval == 0) {
@@ -483,7 +437,7 @@ void thread_run_benchmark(store_t* store, size_t thread_idx) {
         };
 
         UpsertContext context{ txn_keys_.get()[idx], upsert_value };
-        Status result = store->Upsert(context, callback, 1);
+        Status result = store->Upsert(context, callback, kInitCount + 1 + idx);
         ++writes_done;
         break;
       }
@@ -498,7 +452,7 @@ void thread_run_benchmark(store_t* store, size_t thread_idx) {
 
         ReadContext context{ txn_keys_.get()[idx] };
 
-        Status result = store->Read(context, callback, 1);
+        Status result = store->Read(context, callback, kInitCount + 1 + idx);
         ++reads_done;
         break;
       }
@@ -508,7 +462,7 @@ void thread_run_benchmark(store_t* store, size_t thread_idx) {
         };
 
         RmwContext context{ txn_keys_.get()[idx], 5 };
-        Status result = store->Rmw(context, callback, 1);
+        Status result = store->Rmw(context, callback, kInitCount + 1 + idx);
         if(result == Status::Ok) {
           ++writes_done;
         }
@@ -530,12 +484,12 @@ void thread_run_benchmark(store_t* store, size_t thread_idx) {
 }
 
 template <Op(*FN)(std::mt19937&)>
-void run_benchmark(store_t* store, size_t num_threads) {
+double run_benchmark(store_t* store, size_t num_threads) {
   idx_ = 0;
   total_duration_ = 0;
   total_reads_done_ = 0;
   total_writes_done_ = 0;
-  done_ = false;
+  threads_waiting_ = num_threads;
   std::deque<std::thread> threads;
   for(size_t thread_idx = 0; thread_idx < num_threads; ++thread_idx) {
     threads.emplace_back(&thread_run_benchmark<FN>, store, thread_idx);
@@ -562,8 +516,8 @@ void run_benchmark(store_t* store, size_t num_threads) {
 
     uint64_t checkpoint_num = 0;
 
-    while(current_time - start_time < std::chrono::seconds(kRunSeconds)) {
-      std::this_thread::sleep_for(std::chrono::seconds(1));
+    do {
+      std::this_thread::sleep_for(std::chrono::seconds(10));
       current_time = std::chrono::high_resolution_clock::now();
       if(current_time - last_checkpoint_time >= std::chrono::seconds(kCheckpointSeconds)) {
         Guid token;
@@ -576,44 +530,21 @@ void run_benchmark(store_t* store, size_t num_threads) {
         }
         last_checkpoint_time = current_time;
       }
-    }
+    } while (threads_waiting_.load() > 0);
 
-    done_ = true;
   }
 
   for(auto& thread : threads) {
     thread.join();
   }
 
+
+  double ops_per_second_per_thread = ((double)total_reads_done_ + (double)total_writes_done_) / ((double)total_duration_ /
+             kNanosPerSecond);
+
   printf("Finished benchmark: %" PRIu64 " thread checkpoints completed;  %.2f ops/second/thread\n",
-         num_checkpoints.load(),
-         ((double)total_reads_done_ + (double)total_writes_done_) / ((double)total_duration_ /
-             kNanosPerSecond));
-}
-
-void run(Workload workload, size_t num_threads) {
-  // FASTER store has a hash table with approx. kInitCount / 2 entries and a log of size 16 GB
-  size_t init_size = next_power_of_two(kInitCount / 2);
-  store_t store{ init_size, 17179869184, "storage" };
-
-  printf("Populating the store...\n");
-
-  setup_store(&store, num_threads);
-
-  store.DumpDistribution();
-
-  printf("Running benchmark on %" PRIu64 " threads...\n", num_threads);
-  switch(workload) {
-  case Workload::A_50_50:
-    run_benchmark<ycsb_a_50_50>(&store, num_threads);
-    break;
-  case Workload::RMW_100:
-    run_benchmark<ycsb_rmw_100>(&store, num_threads);
-    break;
-  default:
-    printf("Unknown workload!\n");
-    exit(1);
-  }
+         num_checkpoints.load(), ops_per_second_per_thread);
+  return ops_per_second_per_thread;
 }
 
 int main(int argc, char* argv[]) {
@@ -630,7 +561,41 @@ int main(int argc, char* argv[]) {
 
   load_files(load_filename, run_filename);
 
-  run(workload, num_threads);
+  size_t num_benchmark_threads = 1;
+  while (num_benchmark_threads <= num_threads) {
+    // FASTER store has a hash table with approx. kInitCount / 2 entries, a log of size 16 GB,
+    // and a null device (it's in-memory only).
+    size_t init_size = next_power_of_two(kInitCount / 2);
+    store_t store{ init_size, 17179869184, "storage" };
+
+    printf("Populating the store...\n");
+
+    setup_store(&store, num_threads);
+
+    store.DumpDistribution();
+
+    printf("Running benchmark on %" PRIu64 " threads...\n", num_threads);
+    double result;
+    switch(workload) {
+    case Workload::A_50_50:
+      result = run_benchmark<ycsb_a_50_50>(&store, num_benchmark_threads);
+      break;
+    case Workload::RMW_100:
+      result = run_benchmark<ycsb_rmw_100>(&store, num_benchmark_threads);
+      break;
+    default:
+      printf("Unknown workload!\n");
+      exit(1);
+    }
+    delete &store;
+    std::experimental::filesystem::remove_all("storage");
+    results_[num_benchmark_threads] = result;
+    num_benchmark_threads *= 2;
+  }
+
+  for( auto const& x : results_ ) {
+    printf("%d threads %.2f ops/second/thread\n", x.first, x.second);
+  }
 
   return 0;
 }
