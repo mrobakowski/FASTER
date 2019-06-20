@@ -39,8 +39,8 @@ enum class Workload {
 static constexpr uint64_t kInitCount = 250000000;
 static constexpr uint64_t kTxnCount = 1000000000;
 static constexpr uint64_t kChunkSize = 3200 * 8;
-static constexpr uint64_t kRefreshInterval = 64;
-static constexpr uint64_t kCompletePendingInterval = 1600;
+static constexpr uint64_t kRefreshInterval = 64 * 8;
+static constexpr uint64_t kCompletePendingInterval = 1600 * 8;
 
 static_assert(kInitCount * 8 % kChunkSize == 0, "kInitCount % kChunkSize != 0");
 static_assert(kTxnCount * 8 % kChunkSize == 0, "kTxnCount % kChunkSize != 0");
@@ -216,9 +216,6 @@ void setup_store(faster_t* store, size_t num_threads) {
   for(auto& thread : threads) {
     thread.join();
   }
-
-  init_keys_.reset();
-
   printf("Finished populating store: contains ?? elements.\n");
 }
 
@@ -243,7 +240,7 @@ void thread_run_benchmark(faster_t* store, size_t thread_idx) {
 
   while(true) {
     uint64_t chunk_idx = idx_.fetch_add(kChunkSize);
-    if(chunk_idx >= kTxnCount * 8) {
+    if((chunk_idx / 8) >= kTxnCount) {
       threads_waiting_.fetch_sub(1);
       break;
     }
@@ -257,7 +254,7 @@ void thread_run_benchmark(faster_t* store, size_t thread_idx) {
       switch(FN(rng)) {
       case Op::Insert:
       case Op::Upsert: {
-        uint8_t val[8];
+        uint8_t* val = new uint8_t[1];
         val[0] = upsert_value;
         uint8_t* key = new uint8_t[8];
         memcpy(key, &txn_keys_.get()[idx], 8);
@@ -277,9 +274,11 @@ void thread_run_benchmark(faster_t* store, size_t thread_idx) {
         break;
       }
       case Op::ReadModifyWrite:
-        uint8_t modification[8];
+        uint8_t* modification = new uint8_t[1];
         modification[0] = 0;
-        uint8_t result = faster_rmw(store, &txn_keys_.get()[idx], 8, modification, 8, 1, rmw_cb);
+        uint8_t* key = new uint8_t[8];
+        memcpy(key, &txn_keys_.get()[idx], 8);
+        uint8_t result = faster_rmw(store, key, 8, modification, 1, 1, rmw_cb);
         if(result == 0) {
           ++writes_done;
         }
@@ -318,7 +317,7 @@ double run_benchmark(faster_t* store, size_t num_threads) {
   auto last_checkpoint_time = start_time;
   auto current_time = start_time;
 
-  while(threads_waiting_.load() > 0) {
+  do {
     std::this_thread::sleep_for(std::chrono::seconds(10));
     current_time = std::chrono::high_resolution_clock::now();
     if(current_time - last_checkpoint_time >= std::chrono::seconds(kCheckpointSeconds)) {
@@ -334,7 +333,7 @@ double run_benchmark(faster_t* store, size_t num_threads) {
       free(result->token);
       free(result);
     }
-  }
+  } while(threads_waiting_.load() > 0);
 
   for(auto& thread : threads) {
     thread.join();
@@ -385,7 +384,7 @@ int main(int argc, char* argv[]) {
 
     printf("Populating the store...\n");
 
-    setup_store(store, num_threads);
+    setup_store(store, 32);
     faster_dump_distribution(store);
 
     printf("Running benchmark on %" PRIu64 " threads...\n", num_threads);
