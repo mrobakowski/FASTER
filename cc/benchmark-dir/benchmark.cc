@@ -584,7 +584,7 @@ int main(int argc, char* argv[]) {
 
     store.DumpDistribution();
 
-    printf("Running benchmark on %" PRIu64 " threads...\n", num_threads);
+    printf("Running benchmark on %" PRIu64 " threads...\n", num_benchmark_threads);
     double result;
     switch(workload) {
     case Workload::A_50_50:
@@ -594,17 +594,19 @@ int main(int argc, char* argv[]) {
       result = run_benchmark<ycsb_rmw_100>(&store, num_benchmark_threads);
       break;
     case Workload::UPSERT_100:
-      result = run_benchmark<ycsb_upsert_100>(&store, num_threads);
+      result = run_benchmark<ycsb_upsert_100>(&store, num_benchmark_threads);
       break;
     case Workload::READ_100:
-      result = run_benchmark<ycsb_read_100>(&store, num_threads);
+      result = run_benchmark<ycsb_read_100>(&store, num_benchmark_threads);
       break;
     default:
       printf("Unknown workload!\n");
       exit(1);
     }
-    delete &store;
-    std::experimental::filesystem::remove_all("storage");
+    try {
+        std::experimental::filesystem::remove_all("storage");
+    } catch(...) {
+    }
     results_[num_benchmark_threads] = result;
     num_benchmark_threads *= 2;
   }
