@@ -389,7 +389,7 @@ void thread_setup_store(store_t* store, size_t thread_idx) {
       }
 
       UpsertContext context{ init_keys_.get()[idx], value };
-      store->Upsert(context, callback, idx);
+      store->Upsert(context, callback, 1);
     }
   }
 
@@ -447,7 +447,7 @@ void thread_run_benchmark(store_t* store, size_t thread_idx) {
         };
 
         UpsertContext context{ txn_keys_.get()[idx], upsert_value };
-        Status result = store->Upsert(context, callback, kInitCount + 1 + idx);
+        Status result = store->Upsert(context, callback, 1);
         ++writes_done;
         break;
       }
@@ -462,7 +462,7 @@ void thread_run_benchmark(store_t* store, size_t thread_idx) {
 
         ReadContext context{ txn_keys_.get()[idx] };
 
-        Status result = store->Read(context, callback, kInitCount + 1 + idx);
+        Status result = store->Read(context, callback, 1);
         ++reads_done;
         break;
       }
@@ -472,7 +472,7 @@ void thread_run_benchmark(store_t* store, size_t thread_idx) {
         };
 
         RmwContext context{ txn_keys_.get()[idx], 5 };
-        Status result = store->Rmw(context, callback, kInitCount + 1 + idx);
+        Status result = store->Rmw(context, callback, 1);
         if(result == Status::Ok) {
           ++writes_done;
         }
@@ -583,6 +583,7 @@ int main(int argc, char* argv[]) {
     setup_store(&store, num_threads);
 
     store.DumpDistribution();
+    printf("Store Size: %" PRIu64 "\n", store.Size());
 
     printf("Running benchmark on %" PRIu64 " threads...\n", num_benchmark_threads);
     double result;
