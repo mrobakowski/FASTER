@@ -573,10 +573,8 @@ int main(int argc, char* argv[]) {
 
   size_t num_benchmark_threads = 1;
   while (num_benchmark_threads <= num_threads) {
-    // FASTER store has a hash table with approx. kInitCount / 2 entries, a log of size 16 GB,
-    // and a null device (it's in-memory only).
     size_t init_size = next_power_of_two(kInitCount / 2);
-    store_t store{ init_size, 17179869184, "storage" };
+    store_t store{ init_size, 32*1024*1024*1024, "storage" };
 
     printf("Populating the store...\n");
 

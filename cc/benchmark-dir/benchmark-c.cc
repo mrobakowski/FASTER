@@ -375,7 +375,7 @@ int main(int argc, char* argv[]) {
   for (int i = 0; i < (sizeof(thread_configurations) / sizeof(size_t)); i++) {
     size_t num_threads = thread_configurations[i];
     size_t init_size = next_power_of_two(kInitCount / 2);
-    faster_t* store = faster_open_with_disk(init_size, 17179869184, "storage");
+    faster_t* store = faster_open_with_disk(init_size, 32*1024*1024*1024, "storage");
 
     printf("Populating the store...\n");
 
