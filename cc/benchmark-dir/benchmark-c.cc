@@ -357,11 +357,6 @@ double run_benchmark(faster_t* store, size_t num_threads) {
   return ops_per_second_per_thread;
 }
 
-void run(Workload workload, size_t num_threads) {
-  // FASTER store has a hash table with approx. kInitCount / 2 entries, a log of size 16 GB,
-  // and a null device (it's in-memory only).
-}
-
 int main(int argc, char* argv[]) {
   constexpr size_t kNumArgs = 4;
   if(argc != kNumArgs + 1) {
@@ -386,6 +381,7 @@ int main(int argc, char* argv[]) {
 
     setup_store(store, 32);
     faster_dump_distribution(store);
+    printf("Store size: %" PRIu64 "\n", faster_size(store));
 
     printf("Running benchmark on %" PRIu64 " threads...\n", num_threads);
     double result;
