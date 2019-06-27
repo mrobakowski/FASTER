@@ -270,6 +270,7 @@ extern "C" {
       }
       if(replaced) {
         // Some other thread replaced this record.
+        value.gen_lock_.unlock(true);
         return false;
       }
       if(value.size_ < sizeof(Value) + length_) {
@@ -325,13 +326,13 @@ extern "C" {
     }
 
     inline void RmwInitial(Value& value) {
-      value.gen_lock_.store(GenLock{});
+      value.gen_lock_.store(0);
       value.size_ = sizeof(Value) + length_;
       value.length_ = length_;
       std::memcpy(value.buffer(), modification_, length_);
     }
     inline void RmwCopy(const Value& old_value, Value& value) {
-      value.gen_lock_.store(GenLock{});
+      value.gen_lock_.store(0);
       value.length_ = cb_(old_value.buffer(), old_value.length_, modification_, length_, value.buffer());
       value.size_ = sizeof(Value) + value.length_;
     }
@@ -342,6 +343,7 @@ extern "C" {
       }
       if(replaced) {
         // Some other thread replaced this record.
+        value.gen_lock_.unlock(true);
         return false;
       }
       uint64_t new_length = cb_(value.buffer(), value.length_, modification_, length_, NULL);
