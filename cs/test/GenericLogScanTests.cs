@@ -19,12 +19,13 @@ namespace FASTER.test
     {
         private FasterKV<MyKey, MyValue, MyInput, MyOutput, Empty, MyFunctions> fht;
         private IDevice log, objlog;
+        const int totalRecords = 2000;
 
         [SetUp]
         public void Setup()
         {
-            log = Devices.CreateLogDevice(TestContext.CurrentContext.TestDirectory + "\\hlogscan.log", deleteOnClose: true);
-            objlog = Devices.CreateLogDevice(TestContext.CurrentContext.TestDirectory + "\\hlogscan.obj.log", deleteOnClose: true);
+            log = Devices.CreateLogDevice(TestContext.CurrentContext.TestDirectory + "\\GenericFASTERScanTests.log", deleteOnClose: true);
+            objlog = Devices.CreateLogDevice(TestContext.CurrentContext.TestDirectory + "\\GenericFASTERScanTests.obj.log", deleteOnClose: true);
 
             fht = new FasterKV<MyKey, MyValue, MyInput, MyOutput, Empty, MyFunctions>
                 (128, new MyFunctions(),
@@ -42,13 +43,15 @@ namespace FASTER.test
             fht.Dispose();
             fht = null;
             log.Close();
+            objlog.Close();
         }
 
 
         [Test]
         public void GenericDiskWriteScan()
         {
-            const int totalRecords = 2000;
+            var s = fht.Log.Subscribe(new LogObserver());
+
             var start = fht.Log.TailAddress;
             for (int i = 0; i < totalRecords; i++)
             {
@@ -58,28 +61,57 @@ namespace FASTER.test
                 if (i % 100 == 0) fht.Log.FlushAndEvict(true);
             }
             fht.Log.FlushAndEvict(true);
-            var iter = fht.Log.Scan(start, fht.Log.TailAddress, ScanBufferingMode.SinglePageBuffering);
+            using (var iter = fht.Log.Scan(start, fht.Log.TailAddress, ScanBufferingMode.SinglePageBuffering))
+            {
 
+                int val = 0;
+                while (iter.GetNext(out RecordInfo recordInfo, out MyKey key, out MyValue value))
+                {
+                    Assert.IsTrue(key.key == val);
+                    Assert.IsTrue(value.value == val);
+                    val++;
+                }
+                Assert.IsTrue(totalRecords == val);
+            }
+
+            using (var iter = fht.Log.Scan(start, fht.Log.TailAddress, ScanBufferingMode.DoublePageBuffering))
+            {
+                int val = 0;
+                while (iter.GetNext(out RecordInfo recordInfo, out MyKey key, out MyValue value))
+                {
+                    Assert.IsTrue(key.key == val);
+                    Assert.IsTrue(value.value == val);
+                    val++;
+                }
+                Assert.IsTrue(totalRecords == val);
+            }
+
+            s.Dispose();
+        }
+
+        class LogObserver : IObserver<IFasterScanIterator<MyKey, MyValue>>
+        {
             int val = 0;
-            while (iter.GetNext(out MyKey key, out MyValue value))
+
+            public void OnCompleted()
             {
-                Assert.IsTrue(key.key == val);
-                Assert.IsTrue(value.value == val);
-                val++;
+                Assert.IsTrue(val == totalRecords);
             }
-            Assert.IsTrue(totalRecords == val);
 
-            iter = fht.Log.Scan(start, fht.Log.TailAddress, ScanBufferingMode.DoublePageBuffering);
-
-            val = 0;
-            while (iter.GetNext(out MyKey key, out MyValue value))
+            public void OnError(Exception error)
             {
-                Assert.IsTrue(key.key == val);
-                Assert.IsTrue(value.value == val);
-                val++;
             }
-            Assert.IsTrue(totalRecords == val);
 
+            public void OnNext(IFasterScanIterator<MyKey, MyValue> iter)
+            {
+                while (iter.GetNext(out _, out MyKey key, out MyValue value))
+                {
+                    Assert.IsTrue(key.key == val);
+                    Assert.IsTrue(value.value == val);
+                    val++;
+                }
+                iter.Dispose();
+            }
         }
     }
 }

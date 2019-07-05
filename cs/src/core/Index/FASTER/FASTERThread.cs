@@ -18,19 +18,27 @@ namespace FASTER.core
     {
         internal Guid InternalAcquire()
         {
+            epoch.Acquire();
+            overflowBucketsAllocator.Acquire();
+            threadCtx.InitializeThread();
+            prevThreadCtx.InitializeThread();
             Phase phase = _systemState.phase;
             if (phase != Phase.REST)
             {
                 throw new Exception("Can acquire only in REST phase!");
             }
             Guid guid = Guid.NewGuid();
-            InitLocalContext(ref threadCtx, guid);
+            InitLocalContext(guid);
             InternalRefresh();
-            return threadCtx.guid;
+            return threadCtx.Value.guid;
         }
 
         internal long InternalContinue(Guid guid)
         {
+            epoch.Acquire();
+            overflowBucketsAllocator.Acquire();
+            threadCtx.InitializeThread();
+            prevThreadCtx.InitializeThread();
             if (_recoveredSessions != null)
             {
                 if (_recoveredSessions.TryGetValue(guid, out long serialNum))
@@ -48,8 +56,8 @@ namespace FASTER.core
                             {
                                 // We have atomically removed session details. 
                                 // No one else can continue this session
-                                InitLocalContext(ref threadCtx, guid);
-                                threadCtx.serialNum = serialNum;
+                                InitLocalContext(guid);
+                                threadCtx.Value.serialNum = serialNum;
                                 InternalRefresh();
                             }
                             else
@@ -81,7 +89,7 @@ namespace FASTER.core
 
             // We check if we are in normal mode
             var newPhaseInfo = SystemState.Copy(ref _systemState);
-            if (threadCtx.phase == Phase.REST && newPhaseInfo.phase == Phase.REST)
+            if (threadCtx.Value.phase == Phase.REST && newPhaseInfo.phase == Phase.REST)
             {
                 return;
             }
@@ -89,7 +97,7 @@ namespace FASTER.core
             // Moving to non-checkpointing phases
             if (newPhaseInfo.phase == Phase.GC || newPhaseInfo.phase == Phase.PREPARE_GROW || newPhaseInfo.phase == Phase.IN_PROGRESS_GROW)
             {
-                threadCtx.phase = newPhaseInfo.phase;
+                threadCtx.Value.phase = newPhaseInfo.phase;
                 return;
             }
 
@@ -98,38 +106,42 @@ namespace FASTER.core
 
         internal void InternalRelease()
         {
-            Debug.Assert(threadCtx.retryRequests.Count == 0 &&
-                    threadCtx.ioPendingRequests.Count == 0);
-            if (prevThreadCtx != default(FasterExecutionContext))
+            Debug.Assert(threadCtx.Value.retryRequests.Count == 0 &&
+                    threadCtx.Value.ioPendingRequests.Count == 0);
+            if (prevThreadCtx.Value != default(FasterExecutionContext))
             {
-                Debug.Assert(prevThreadCtx.retryRequests.Count == 0 &&
-                    prevThreadCtx.ioPendingRequests.Count == 0);
+                Debug.Assert(prevThreadCtx.Value.retryRequests.Count == 0 &&
+                    prevThreadCtx.Value.ioPendingRequests.Count == 0);
             }
-            Debug.Assert(threadCtx.phase == Phase.REST);
-            prevThreadCtx = null;
-            threadCtx = null;
+            Debug.Assert(threadCtx.Value.phase == Phase.REST);
+            threadCtx.DisposeThread();
+            prevThreadCtx.DisposeThread();
             epoch.Release();
+            overflowBucketsAllocator.Release();
         }
 
-        internal void InitLocalContext(ref FasterExecutionContext context, Guid token)
+        internal void InitLocalContext(Guid token)
         {
-            context = new FasterExecutionContext
-            {
-                phase = Phase.REST,
-                version = _systemState.version,
-                markers = new bool[8],
-                serialNum = 0,
-                totalPending = 0,
-                guid = token,
-                retryRequests = new Queue<PendingContext>(),
-                readyResponses = new BlockingCollection<AsyncIOContext<Key, Value>>(),
-                ioPendingRequests = new Dictionary<long, PendingContext>()
-            };
+            var ctx = 
+                new FasterExecutionContext
+                {
+                    phase = Phase.REST,
+                    version = _systemState.version,
+                    markers = new bool[8],
+                    serialNum = 0,
+                    totalPending = 0,
+                    guid = token,
+                    retryRequests = new Queue<PendingContext>(),
+                    readyResponses = new BlockingCollection<AsyncIOContext<Key, Value>>(),
+                    ioPendingRequests = new Dictionary<long, PendingContext>()
+                };
 
             for(int i = 0; i < 8; i++)
             {
-                context.markers[i] = false;
+                ctx.markers[i] = false;
             }
+
+            threadCtx.Value = ctx;
         }
 
         internal bool InternalCompletePending(bool wait = false)
@@ -139,34 +151,40 @@ namespace FASTER.core
                 bool done = true;
 
                 #region Previous pending requests
-                if (threadCtx.phase == Phase.IN_PROGRESS
+                if (threadCtx.Value.phase == Phase.IN_PROGRESS
                     ||
-                    threadCtx.phase == Phase.WAIT_PENDING)
+                    threadCtx.Value.phase == Phase.WAIT_PENDING)
                 {
-                    CompleteIOPendingRequests(prevThreadCtx);
+                    CompleteIOPendingRequests(prevThreadCtx.Value);
                     Refresh();
-                    CompleteRetryRequests(prevThreadCtx);
+                    CompleteRetryRequests(prevThreadCtx.Value);
 
-                    done &= (prevThreadCtx.ioPendingRequests.Count == 0);
-                    done &= (prevThreadCtx.retryRequests.Count == 0);
+                    done &= (prevThreadCtx.Value.ioPendingRequests.Count == 0);
+                    done &= (prevThreadCtx.Value.retryRequests.Count == 0);
                 }
                 #endregion
 
-                if (!(threadCtx.phase == Phase.IN_PROGRESS
+                if (!(threadCtx.Value.phase == Phase.IN_PROGRESS
                       || 
-                      threadCtx.phase == Phase.WAIT_PENDING))
+                      threadCtx.Value.phase == Phase.WAIT_PENDING))
                 {
-                    CompleteIOPendingRequests(threadCtx);
+                    CompleteIOPendingRequests(threadCtx.Value);
                 }
                 InternalRefresh();
-                CompleteRetryRequests(threadCtx);
+                CompleteRetryRequests(threadCtx.Value);
 
-                done &= (threadCtx.ioPendingRequests.Count == 0);
-                done &= (threadCtx.retryRequests.Count == 0);
+                done &= (threadCtx.Value.ioPendingRequests.Count == 0);
+                done &= (threadCtx.Value.retryRequests.Count == 0);
 
                 if (done)
                 {
                     return true;
+                }
+
+                if (wait)
+                {
+                    // Yield before checking again
+                    Thread.Yield();
                 }
             } while (wait);
 
@@ -199,12 +217,14 @@ namespace FASTER.core
         {
             var status = default(Status);
             var internalStatus = default(OperationStatus);
+            ref Key key = ref pendingContext.key.Get();
+            ref Value value = ref pendingContext.value.Get();
 
             #region Entry latch operation
             var handleLatches = false;
-            if ((ctx.version < threadCtx.version) // Thread has already shifted to (v+1)
+            if ((ctx.version < threadCtx.Value.version) // Thread has already shifted to (v+1)
                 ||
-                (threadCtx.phase == Phase.PREPARE)) // Thread still in version v, but acquired shared-latch 
+                (threadCtx.Value.phase == Phase.PREPARE)) // Thread still in version v, but acquired shared-latch 
             {
                 handleLatches = true;
             }
@@ -217,9 +237,14 @@ namespace FASTER.core
                     internalStatus = InternalRetryPendingRMW(ctx, ref pendingContext);
                     break;
                 case OperationType.UPSERT:
-                    internalStatus = InternalUpsert(ref pendingContext.key, 
-                                                    ref pendingContext.value, 
+                    internalStatus = InternalUpsert(ref key, 
+                                                    ref value, 
                                                     ref pendingContext.userContext, 
+                                                    ref pendingContext);
+                    break;
+                case OperationType.DELETE:
+                    internalStatus = InternalDelete(ref key,
+                                                    ref pendingContext.userContext,
                                                     ref pendingContext);
                     break;
                 case OperationType.READ:
@@ -241,18 +266,22 @@ namespace FASTER.core
             if (status == Status.OK || status == Status.NOTFOUND)
             {
                 if (handleLatches)
-                    ReleaseSharedLatch(pendingContext.key);
+                    ReleaseSharedLatch(key);
 
                 switch (pendingContext.type)
                 {
                     case OperationType.RMW:
-                        functions.RMWCompletionCallback(ref pendingContext.key,
+                        functions.RMWCompletionCallback(ref key,
                                                 ref pendingContext.input,
                                                 pendingContext.userContext, status);
                         break;
                     case OperationType.UPSERT:
-                        functions.UpsertCompletionCallback(ref pendingContext.key,
-                                                 ref pendingContext.value,
+                        functions.UpsertCompletionCallback(ref key,
+                                                 ref value,
+                                                 pendingContext.userContext);
+                        break;
+                    case OperationType.DELETE:
+                        functions.DeleteCompletionCallback(ref key,
                                                  pendingContext.userContext);
                         break;
                     default:
@@ -267,9 +296,9 @@ namespace FASTER.core
                                     AsyncIOContext<Key, Value> request)
         {
             var handleLatches = false;
-            if ((ctx.version < threadCtx.version) // Thread has already shifted to (v+1)
+            if ((ctx.version < threadCtx.Value.version) // Thread has already shifted to (v+1)
                 ||
-                (threadCtx.phase == Phase.PREPARE)) // Thread still in version v, but acquired shared-latch 
+                (threadCtx.Value.phase == Phase.PREPARE)) // Thread still in version v, but acquired shared-latch 
             {
                 handleLatches = true;
             }
@@ -278,6 +307,7 @@ namespace FASTER.core
             {
                 var status = default(Status);
                 var internalStatus = default(OperationStatus);
+                ref Key key = ref pendingContext.key.Get();
 
                 // Remove from pending dictionary
                 ctx.ioPendingRequests.Remove(request.id);
@@ -291,8 +321,8 @@ namespace FASTER.core
                 {
                     internalStatus = InternalContinuePendingRMW(ctx, request, ref pendingContext); ;
                 }
-                
-                request.record.Return();
+
+                request.Dispose();
 
                 // Handle operation status
                 if (internalStatus == OperationStatus.SUCCESS || internalStatus == OperationStatus.NOTFOUND)
@@ -308,11 +338,11 @@ namespace FASTER.core
                 if(status == Status.OK || status == Status.NOTFOUND)
                 {
                     if (handleLatches)
-                        ReleaseSharedLatch(pendingContext.key);
+                        ReleaseSharedLatch(key);
 
                     if (pendingContext.type == OperationType.READ)
                     {
-                        functions.ReadCompletionCallback(ref pendingContext.key, 
+                        functions.ReadCompletionCallback(ref key, 
                                                          ref pendingContext.input, 
                                                          ref pendingContext.output, 
                                                          pendingContext.userContext,
@@ -320,12 +350,13 @@ namespace FASTER.core
                     }
                     else
                     {
-                        functions.RMWCompletionCallback(ref pendingContext.key,
+                        functions.RMWCompletionCallback(ref key,
                                                         ref pendingContext.input,
                                                         pendingContext.userContext,
                                                         status);
                     }
                 }
+                pendingContext.Dispose();
             }
         }
 

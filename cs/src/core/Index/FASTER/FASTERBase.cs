@@ -251,7 +251,7 @@ namespace FASTER.core
         internal long minTableSize = 16;
 
         // Allocator for the hash buckets
-        internal MallocFixedPageSize<HashBucket> overflowBucketsAllocator = new MallocFixedPageSize<HashBucket>();
+        internal readonly MallocFixedPageSize<HashBucket> overflowBucketsAllocator;
 
         // An array of size two, that contains the old and new versions of the hash-table
         internal InternalHashTable[] state = new InternalHashTable[2];
@@ -269,20 +269,20 @@ namespace FASTER.core
 
         internal ResizeInfo resizeInfo;
 
-        internal long currentSize;
-
         /// <summary>
         /// Constructor
         /// </summary>
         public FasterBase()
         {
-            epoch = LightEpoch.Instance;
+            epoch = new LightEpoch();
+            overflowBucketsAllocator = new MallocFixedPageSize<HashBucket>(false, epoch);
         }
 
         internal Status Free()
         {
             Free(0);
             Free(1);
+            epoch.Dispose();
             overflowBucketsAllocator.Dispose();
             return Status.OK;
         }
@@ -555,7 +555,7 @@ namespace FASTER.core
                     }
 
                     entry.word = target_entry_word;
-                    if (entry.Address < BeginAddress)
+                    if (entry.Address < BeginAddress && entry.Address != Constants.kTempInvalidAddress)
                     {
                         if (entry.word == Interlocked.CompareExchange(ref bucket->bucket_entries[index], Constants.kInvalidAddress, target_entry_word))
                         {
@@ -733,7 +733,7 @@ namespace FASTER.core
         /// 
         /// </summary>
         /// <param name="version"></param>
-        protected virtual void _DumpDistribution(int version)
+        protected virtual string _DumpDistribution(int version)
         {
             var table_size_ = state[version].size;
             var ptable_ = state[version].tableAligned;
@@ -742,6 +742,7 @@ namespace FASTER.core
 
             for (long bucket = 0; bucket < table_size_; ++bucket)
             {
+                List<int> tags = new List<int>();
                 int cnt = 0;
                 HashBucket b = *(ptable_ + bucket);
                 while (true)
@@ -750,6 +751,11 @@ namespace FASTER.core
                     {
                         if (0 != b.bucket_entries[bucket_entry])
                         {
+                            var x = default(HashBucketEntry);
+                            x.word = b.bucket_entries[bucket_entry];
+                            if (tags.Contains(x.Tag) && !x.Tentative)
+                                throw new Exception("Duplicate tag found in index");
+                            tags.Add(x.Tag);
                             ++cnt;
                             ++total_record_count;
                         }
@@ -762,23 +768,25 @@ namespace FASTER.core
                 histogram[cnt]++;
             }
 
-            Console.WriteLine("Number of hash buckets: {0}", table_size_);
-            Console.WriteLine("Total distinct hash-table entry count: {0}", total_record_count);
-            Console.WriteLine("Average #entries per hash bucket: {0:0.00}", total_record_count / (double)table_size_);
-            Console.WriteLine("Histogram of #entries per bucket: ");
-
+            var distribution =
+                $"Number of hash buckets: {{{table_size_}}}\n" +
+                $"Total distinct hash-table entry count: {{{total_record_count}}}\n" +
+                $"Average #entries per hash bucket: {{{total_record_count / (double)table_size_:0.00}}}\n" +
+                $"Histogram of #entries per bucket:\n";
             foreach (var kvp in histogram.OrderBy(e => e.Key))
             {
-                Console.WriteLine(kvp.Key.ToString() + ": " + kvp.Value.ToString(CultureInfo.InvariantCulture));
+                distribution += $"  {kvp.Key} : {kvp.Value}\n";
             }
+
+            return distribution;
         }
 
         /// <summary>
         /// Dumps the distribution of each non-empty bucket in the hash table.
         /// </summary>
-        public void DumpDistribution()
+        public string DumpDistribution()
         {
-            _DumpDistribution(resizeInfo.version);
+            return _DumpDistribution(resizeInfo.version);
         }
 
     }

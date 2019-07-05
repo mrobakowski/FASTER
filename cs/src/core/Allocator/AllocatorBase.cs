@@ -5,10 +5,6 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Runtime.InteropServices;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq.Expressions;
-using System.IO;
 using System.Diagnostics;
 
 namespace FASTER.core
@@ -60,7 +56,8 @@ namespace FASTER.core
         /// <summary>
         /// Epoch information
         /// </summary>
-        protected LightEpoch epoch;
+        protected readonly LightEpoch epoch;
+        private readonly bool ownedEpoch;
 
         /// <summary>
         /// Comparer
@@ -120,6 +117,11 @@ namespace FASTER.core
         /// HeadOffset lag (from tail)
         /// </summary>
         protected const int HeadOffsetLagNumPages = 4;
+
+        /// <summary>
+        /// HeadOffset lag (from tail) for ReadCache
+        /// </summary>
+        protected const int ReadCacheHeadOffsetLagNumPages = 1;
         /// <summary>
         /// HeadOffset lag size
         /// </summary>
@@ -201,13 +203,13 @@ namespace FASTER.core
         /// <summary>
         /// Number of pending reads
         /// </summary>
-        private static int numPendingReads = 0;
+        private int numPendingReads = 0;
         #endregion
 
         /// <summary>
-        /// Read buffer pool
+        /// Buffer pool
         /// </summary>
-        protected SectorAlignedBufferPool readBufferPool;
+        protected SectorAlignedBufferPool bufferPool;
 
         /// <summary>
         /// Read cache
@@ -218,6 +220,11 @@ namespace FASTER.core
         /// Read cache eviction callback
         /// </summary>
         protected readonly Action<long, long> EvictCallback = null;
+
+        /// <summary>
+        /// Observer for records entering read-only region
+        /// </summary>
+        internal IObserver<IFasterScanIterator<Key, Value>> OnReadOnlyObserver;
 
         #region Abstract methods
         /// <summary>
@@ -230,6 +237,12 @@ namespace FASTER.core
         /// <param name="page"></param>
         /// <returns></returns>
         public abstract long GetStartLogicalAddress(long page);
+        /// <summary>
+        /// Get first valid logical address
+        /// </summary>
+        /// <param name="page"></param>
+        /// <returns></returns>
+        public abstract long GetFirstValidLogicalAddress(long page);
         /// <summary>
         /// Get physical address
         /// </summary>
@@ -281,6 +294,16 @@ namespace FASTER.core
         /// <param name="physicalAddress"></param>
         /// <returns></returns>
         public abstract int GetRecordSize(long physicalAddress);
+
+
+        /// <summary>
+        /// Get number of bytes required
+        /// </summary>
+        /// <param name="physicalAddress"></param>
+        /// <param name="availableBytes"></param>
+        /// <returns></returns>
+        public virtual int GetRequiredRecordSize(long physicalAddress, int availableBytes) => GetAverageRecordSize();
+
         /// <summary>
         /// Get average record size
         /// </summary>
@@ -373,6 +396,42 @@ namespace FASTER.core
         /// <param name="ctx"></param>
         /// <returns></returns>
         protected abstract bool RetrievedFullRecord(byte* record, ref AsyncIOContext<Key, Value> ctx);
+
+        /// <summary>
+        /// Retrieve value from context
+        /// </summary>
+        /// <param name="ctx"></param>
+        /// <returns></returns>
+        public virtual ref Key GetContextRecordKey(ref AsyncIOContext<Key, Value> ctx) => ref ctx.key;
+
+        /// <summary>
+        /// Retrieve value from context
+        /// </summary>
+        /// <param name="ctx"></param>
+        /// <returns></returns>
+        public virtual ref Value GetContextRecordValue(ref AsyncIOContext<Key, Value> ctx) => ref ctx.value;
+
+        /// <summary>
+        /// Get heap container for pending key
+        /// </summary>
+        /// <param name="key"></param>
+        /// <returns></returns>
+        public abstract IHeapContainer<Key> GetKeyContainer(ref Key key);
+
+        /// <summary>
+        /// Get heap container for pending value
+        /// </summary>
+        /// <param name="value"></param>
+        /// <returns></returns>
+        public abstract IHeapContainer<Value> GetValueContainer(ref Value value);
+
+        /// <summary>
+        /// Copy value to context
+        /// </summary>
+        /// <param name="ctx"></param>
+        /// <param name="value"></param>
+        public virtual void PutContext(ref AsyncIOContext<Key, Value> ctx, ref Value value) => ctx.value = value;
+
         /// <summary>
         /// Whether key has objects
         /// </summary>
@@ -404,29 +463,29 @@ namespace FASTER.core
 
 
         /// <summary>
-        /// 
+        /// Instantiate base allocator
         /// </summary>
         /// <param name="settings"></param>
         /// <param name="comparer"></param>
         /// <param name="evictCallback"></param>
-        public AllocatorBase(LogSettings settings, IFasterEqualityComparer<Key> comparer, Action<long, long> evictCallback) 
-            : this(settings, comparer)
+        /// <param name="epoch"></param>
+        public AllocatorBase(LogSettings settings, IFasterEqualityComparer<Key> comparer, Action<long, long> evictCallback, LightEpoch epoch)
         {
             if (evictCallback != null)
             {
                 ReadCache = true;
                 EvictCallback = evictCallback;
             }
-        }
 
-        /// <summary>
-        /// Instantiate base allocator
-        /// </summary>
-        /// <param name="settings"></param>
-        /// <param name="comparer"></param>
-        public AllocatorBase(LogSettings settings, IFasterEqualityComparer<Key> comparer)
-        {
             this.comparer = comparer;
+            if (epoch == null)
+            {
+                this.epoch = new LightEpoch();
+                ownedEpoch = true;
+            }
+            else
+                this.epoch = epoch;
+
             settings.LogDevice.Initialize(1L << settings.SegmentSizeBits);
             settings.ObjectLogDevice?.Initialize(1L << settings.SegmentSizeBits);
 
@@ -441,8 +500,8 @@ namespace FASTER.core
             BufferSize = (int)(LogTotalSizeBytes / (1L << LogPageSizeBits));
             BufferSizeMask = BufferSize - 1;
 
-            // HeadOffset lag (from tail)
-            HeadOffsetLagSize = BufferSize - HeadOffsetLagNumPages;
+            // HeadOffset lag (from tail).
+            HeadOffsetLagSize = BufferSize - (ReadCache ? ReadCacheHeadOffsetLagNumPages : HeadOffsetLagNumPages);
             HeadOffsetLagAddress = (long)HeadOffsetLagSize << LogPageSizeBits;
 
             // ReadOnlyOffset lag (from tail). This should not exceed HeadOffset lag.
@@ -473,9 +532,8 @@ namespace FASTER.core
         protected void Initialize(long firstValidAddress)
         {
             Debug.Assert(firstValidAddress <= PageSize);
-            Debug.Assert(PageSize >= GetRecordSize(0));
 
-            readBufferPool = SectorAlignedBufferPool.GetPool(1, sectorSize);
+            bufferPool = new SectorAlignedBufferPool(1, sectorSize);
 
             long tailPage = firstValidAddress >> LogPageSizeBits;
             int tailPageIndex = (int)(tailPage % BufferSize);
@@ -499,6 +557,24 @@ namespace FASTER.core
         }
 
         /// <summary>
+        /// Acquire thread
+        /// </summary>
+        public void Acquire()
+        {
+            if (ownedEpoch)
+                epoch.Acquire();
+        }
+
+        /// <summary>
+        /// Release thread
+        /// </summary>
+        public void Release()
+        {
+            if (ownedEpoch)
+                epoch.Release();
+        }
+
+        /// <summary>
         /// Dispose allocator
         /// </summary>
         public virtual void Dispose()
@@ -513,6 +589,12 @@ namespace FASTER.core
             SafeHeadAddress = 0;
             HeadAddress = 0;
             BeginAddress = 1;
+
+            if (ownedEpoch)
+                epoch.Dispose();
+            bufferPool.Free();
+
+            OnReadOnlyObserver?.OnCompleted();
         }
 
         /// <summary>
@@ -859,6 +941,9 @@ namespace FASTER.core
                 long startPage = oldSafeReadOnlyAddress >> LogPageSizeBits;
 
                 long endPage = (newSafeReadOnlyAddress >> LogPageSizeBits);
+
+                OnReadOnlyObserver?.OnNext(Scan(oldSafeReadOnlyAddress, newSafeReadOnlyAddress, ScanBufferingMode.NoBuffering));
+
                 int numPages = (int)(endPage - startPage);
                 if (numPages > 10)
                 {
@@ -1069,7 +1154,7 @@ namespace FASTER.core
             
             HeadAddress = headAddress;
             SafeHeadAddress = headAddress;
-            FlushedUntilAddress = headAddress;
+            FlushedUntilAddress = tailAddress;
             ReadOnlyAddress = tailAddress;
             SafeReadOnlyAddress = tailAddress;
 
@@ -1114,7 +1199,7 @@ namespace FASTER.core
             uint alignedReadLength = (uint)((long)fileOffset + numBytes - (long)alignedFileOffset);
             alignedReadLength = (uint)((alignedReadLength + (sectorSize - 1)) & ~(sectorSize - 1));
 
-            var record = readBufferPool.Get((int)alignedReadLength);
+            var record = bufferPool.Get((int)alignedReadLength);
             record.valid_offset = (int)(fileOffset - alignedFileOffset);
             record.available_bytes = (int)(alignedReadLength - (fileOffset - alignedFileOffset));
             record.required_bytes = numBytes;
@@ -1135,6 +1220,7 @@ namespace FASTER.core
         /// <typeparam name="TContext"></typeparam>
         /// <param name="readPageStart"></param>
         /// <param name="numPages"></param>
+        /// <param name="untilAddress"></param>
         /// <param name="callback"></param>
         /// <param name="context"></param>
         /// <param name="devicePageOffset"></param>
@@ -1143,12 +1229,13 @@ namespace FASTER.core
         public void AsyncReadPagesFromDevice<TContext>(
                                 long readPageStart,
                                 int numPages,
+                                long untilAddress,
                                 IOCompletionCallback callback,
                                 TContext context,
                                 long devicePageOffset = 0,
                                 IDevice logDevice = null, IDevice objectLogDevice = null)
         {
-            AsyncReadPagesFromDevice(readPageStart, numPages, callback, context,
+            AsyncReadPagesFromDevice(readPageStart, numPages, untilAddress, callback, context,
                 out CountdownEvent completed, devicePageOffset, logDevice, objectLogDevice);
         }
 
@@ -1158,6 +1245,7 @@ namespace FASTER.core
         /// <typeparam name="TContext"></typeparam>
         /// <param name="readPageStart"></param>
         /// <param name="numPages"></param>
+        /// <param name="untilAddress"></param>
         /// <param name="callback"></param>
         /// <param name="context"></param>
         /// <param name="completed"></param>
@@ -1167,6 +1255,7 @@ namespace FASTER.core
         private void AsyncReadPagesFromDevice<TContext>(
                                         long readPageStart,
                                         int numPages,
+                                        long untilAddress,
                                         IOCompletionCallback callback,
                                         TContext context,
                                         out CountdownEvent completed,
@@ -1199,15 +1288,24 @@ namespace FASTER.core
                     page = readPage,
                     context = context,
                     handle = completed,
-                    count = 1
+                    maxPtr = PageSize
                 };
 
                 ulong offsetInFile = (ulong)(AlignedPageSizeBytes * readPage);
+                uint readLength = (uint)AlignedPageSizeBytes;
+                long adjustedUntilAddress = (AlignedPageSizeBytes * (untilAddress >> LogPageSizeBits) + (untilAddress & PageSizeMask));
 
+                if (adjustedUntilAddress > 0 && ((adjustedUntilAddress - (long)offsetInFile) < PageSize))
+                {
+                    readLength = (uint)(adjustedUntilAddress - (long)offsetInFile);
+                    asyncResult.maxPtr = readLength;
+                    readLength = (uint)((readLength + (sectorSize - 1)) & ~(sectorSize - 1));
+                }
+                
                 if (device != null)
                     offsetInFile = (ulong)(AlignedPageSizeBytes * (readPage - devicePageOffset));
 
-                ReadAsync(offsetInFile, pageIndex, (uint)PageSize, callback, asyncResult, usedDevice, usedObjlogDevice);
+                ReadAsync(offsetInFile, pageIndex, readLength, callback, asyncResult, usedDevice, usedObjlogDevice);
             }
         }
 
@@ -1355,14 +1453,13 @@ namespace FASTER.core
                               AsyncIOContext<Key, Value> context,
                               SectorAlignedMemory result = default(SectorAlignedMemory))
         {
-            while (numPendingReads > 120)
+            if (epoch.IsProtected()) // Do not spin for unprotected IO threads
             {
-                Thread.SpinWait(100);
-
-                // Do not protect if we are not already protected
-                // E.g., we are in an IO thread
-                if (epoch.IsProtected())
+                while (numPendingReads > 120)
+                {
+                    Thread.Yield();
                     epoch.ProtectAndDrain();
+                }
             }
             Interlocked.Increment(ref numPendingReads);
 
@@ -1385,13 +1482,13 @@ namespace FASTER.core
             var ctx = result.context;
 
             var record = ctx.record.GetValidPointer();
-            int requiredBytes = GetRecordSize((long)record);
+            int requiredBytes = GetRequiredRecordSize((long)record, ctx.record.available_bytes);
             if (ctx.record.available_bytes >= requiredBytes)
             {
                 // We have the complete record.
                 if (RetrievedFullRecord(record, ref ctx))
                 {
-                    if (comparer.Equals(ref ctx.request_key, ref ctx.key))
+                    if (comparer.Equals(ref ctx.request_key.Get(), ref GetContextRecordKey(ref ctx)))
                     {
                         // The keys are same, so I/O is complete
                         // ctx.record = result.record;

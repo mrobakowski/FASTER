@@ -20,8 +20,9 @@ namespace FASTER.test.recovery
         {
             int seed = 123;
             var rand1 = new Random(seed);
-            var device = Devices.CreateLogDevice(TestContext.CurrentContext.TestDirectory + "\\test_ofb.dat", deleteOnClose: true);
+            var device = Devices.CreateLogDevice(TestContext.CurrentContext.TestDirectory + "\\MallocFixedPageSizeRecoveryTest.dat", deleteOnClose: true);
             var allocator = new MallocFixedPageSize<HashBucket>();
+            allocator.Acquire();
 
             //do something
             int numBucketsToAdd = 16 * allocator.GetPageSize();
@@ -42,8 +43,12 @@ namespace FASTER.test.recovery
             //wait until complete
             allocator.IsCheckpointCompleted(true);
 
+            allocator.Release();
+            allocator.Dispose();
 
             var recoveredAllocator = new MallocFixedPageSize<HashBucket>();
+            recoveredAllocator.Acquire();
+
             //issue call to recover
             recoveredAllocator.BeginRecovery(device, 0, numBucketsToAdd, numBytesWritten, out ulong numBytesRead);
             //wait until complete
@@ -61,6 +66,9 @@ namespace FASTER.test.recovery
                     Assert.IsTrue(bucket->bucket_entries[j] == rand2.Next());
                 }
             }
+
+            recoveredAllocator.Release();
+            recoveredAllocator.Dispose();
         }
 
         [Test]
@@ -70,8 +78,8 @@ namespace FASTER.test.recovery
             int size = 1 << 16;
             long numAdds = 1 << 18;
 
-            IDevice ht_device = Devices.CreateLogDevice(TestContext.CurrentContext.TestDirectory + "\\ht.dat", deleteOnClose: true);
-            IDevice ofb_device = Devices.CreateLogDevice(TestContext.CurrentContext.TestDirectory + "\\ofb.dat", deleteOnClose: true);
+            IDevice ht_device = Devices.CreateLogDevice(TestContext.CurrentContext.TestDirectory + "\\TestFuzzyIndexRecoveryht.dat", deleteOnClose: true);
+            IDevice ofb_device = Devices.CreateLogDevice(TestContext.CurrentContext.TestDirectory + "\\TestFuzzyIndexRecoveryofb.dat", deleteOnClose: true);
 
             var hash_table1 = new FasterBase();
             hash_table1.Initialize(size, 512);
@@ -135,6 +143,9 @@ namespace FASTER.test.recovery
                     Assert.IsTrue(entry1.word == entry2.word);
                 }
             }
+
+            hash_table1.Free();
+            hash_table2.Free();
         }
     }
 }

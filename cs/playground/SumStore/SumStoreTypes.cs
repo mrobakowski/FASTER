@@ -58,6 +58,10 @@ namespace SumStore
         {
         }
 
+        public void DeleteCompletionCallback(ref AdId key, Empty ctx)
+        {
+        }
+
         public void CheckpointCompletionCallback(Guid sessionId, long serialNum)
         {
             Console.WriteLine("Session {0} reports persistence until {1}", sessionId, serialNum);
@@ -98,7 +102,7 @@ namespace SumStore
 
         public void CopyUpdater(ref AdId key, ref Input input, ref NumClicks oldValue, ref NumClicks newValue)
         {
-            newValue.numClicks += oldValue.numClicks + input.numClicks.numClicks;
+            newValue.numClicks = oldValue.numClicks + input.numClicks.numClicks;
         }
     }
 }
