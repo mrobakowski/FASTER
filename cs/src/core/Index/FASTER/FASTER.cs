@@ -29,6 +29,16 @@ namespace FASTER.core
         public long EntryCount => GetEntryCount();
 
         /// <summary>
+        /// Size of index in #cache lines (64 bytes each)
+        /// </summary>
+        public long IndexSize => state[resizeInfo.version].size;
+
+        /// <summary>
+        /// Comparer used by FASTER
+        /// </summary>
+        public IFasterEqualityComparer<Key> Comparer => comparer;
+
+        /// <summary>
         /// Hybrid log used by this FASTER instance
         /// </summary>
         public LogAccessor<Key, Value, Input, Output, Context> Log { get; }
@@ -57,11 +67,8 @@ namespace FASTER.core
 
         private SafeConcurrentDictionary<Guid, long> _recoveredSessions;
 
-        [ThreadStatic]
-        private static FasterExecutionContext prevThreadCtx = default(FasterExecutionContext);
-
-        [ThreadStatic]
-        private static FasterExecutionContext threadCtx = default(FasterExecutionContext);
+        private FastThreadLocal<FasterExecutionContext> prevThreadCtx;
+        private FastThreadLocal<FasterExecutionContext> threadCtx;
 
 
         /// <summary>
@@ -69,12 +76,16 @@ namespace FASTER.core
         /// </summary>
         /// <param name="size">Size of core index (#cache lines)</param>
         /// <param name="comparer">FASTER equality comparer for key</param>
+        /// <param name="variableLengthStructSettings"></param>
         /// <param name="functions">Callback functions</param>
         /// <param name="logSettings">Log settings</param>
         /// <param name="checkpointSettings">Checkpoint settings</param>
         /// <param name="serializerSettings">Serializer settings</param>
-        public FasterKV(long size, Functions functions, LogSettings logSettings, CheckpointSettings checkpointSettings = null, SerializerSettings<Key, Value> serializerSettings = null, IFasterEqualityComparer<Key> comparer = null)
+        public FasterKV(long size, Functions functions, LogSettings logSettings, CheckpointSettings checkpointSettings = null, SerializerSettings<Key, Value> serializerSettings = null, IFasterEqualityComparer<Key> comparer = null, VariableLengthStructSettings<Key, Value> variableLengthStructSettings = null)
         {
+            threadCtx = new FastThreadLocal<FasterExecutionContext>();
+            prevThreadCtx = new FastThreadLocal<FasterExecutionContext>();
+
             if (comparer != null)
                 this.comparer = comparer;
             else
@@ -107,24 +118,47 @@ namespace FASTER.core
 
             if (Utility.IsBlittable<Key>() && Utility.IsBlittable<Value>())
             {
-                hlog = new BlittableAllocator<Key, Value>(logSettings, this.comparer);
-                Log = new LogAccessor<Key, Value, Input, Output, Context>(this, hlog);
-                if (UseReadCache)
+                if (variableLengthStructSettings != null)
                 {
-                    readcache = new BlittableAllocator<Key, Value>(
-                        new LogSettings {
-                            PageSizeBits = logSettings.ReadCacheSettings.PageSizeBits,
-                            MemorySizeBits = logSettings.ReadCacheSettings.MemorySizeBits,
-                            SegmentSizeBits = logSettings.ReadCacheSettings.MemorySizeBits,
-                            MutableFraction = logSettings.ReadCacheSettings.SecondChanceFraction
-                        }, this.comparer, ReadCacheEvict);
-                    readcache.Initialize();
-                    ReadCache = new LogAccessor<Key, Value, Input, Output, Context>(this, readcache);
+                    hlog = new VariableLengthBlittableAllocator<Key, Value>
+                        (logSettings, variableLengthStructSettings, this.comparer, null, epoch);
+                    Log = new LogAccessor<Key, Value, Input, Output, Context>(this, hlog);
+                    if (UseReadCache)
+                    {
+                        readcache = new VariableLengthBlittableAllocator<Key, Value>(
+                            new LogSettings
+                            {
+                                PageSizeBits = logSettings.ReadCacheSettings.PageSizeBits,
+                                MemorySizeBits = logSettings.ReadCacheSettings.MemorySizeBits,
+                                SegmentSizeBits = logSettings.ReadCacheSettings.MemorySizeBits,
+                                MutableFraction = logSettings.ReadCacheSettings.SecondChanceFraction
+                            }, variableLengthStructSettings, this.comparer, ReadCacheEvict, epoch);
+                        readcache.Initialize();
+                        ReadCache = new LogAccessor<Key, Value, Input, Output, Context>(this, readcache);
+                    }
+                }
+                else
+                {
+                    hlog = new BlittableAllocator<Key, Value>(logSettings, this.comparer, null, epoch);
+                    Log = new LogAccessor<Key, Value, Input, Output, Context>(this, hlog);
+                    if (UseReadCache)
+                    {
+                        readcache = new BlittableAllocator<Key, Value>(
+                            new LogSettings
+                            {
+                                PageSizeBits = logSettings.ReadCacheSettings.PageSizeBits,
+                                MemorySizeBits = logSettings.ReadCacheSettings.MemorySizeBits,
+                                SegmentSizeBits = logSettings.ReadCacheSettings.MemorySizeBits,
+                                MutableFraction = logSettings.ReadCacheSettings.SecondChanceFraction
+                            }, this.comparer, ReadCacheEvict, epoch);
+                        readcache.Initialize();
+                        ReadCache = new LogAccessor<Key, Value, Input, Output, Context>(this, readcache);
+                    }
                 }
             }
             else
             {
-                hlog = new GenericAllocator<Key, Value>(logSettings, serializerSettings, this.comparer);
+                hlog = new GenericAllocator<Key, Value>(logSettings, serializerSettings, this.comparer, null, epoch);
                 Log = new LogAccessor<Key, Value, Input, Output, Context>(this, hlog);
                 if (UseReadCache)
                 {
@@ -135,7 +169,7 @@ namespace FASTER.core
                             MemorySizeBits = logSettings.ReadCacheSettings.MemorySizeBits,
                             SegmentSizeBits = logSettings.ReadCacheSettings.MemorySizeBits,
                             MutableFraction = logSettings.ReadCacheSettings.SecondChanceFraction
-                        }, serializerSettings, this.comparer, ReadCacheEvict);
+                        }, serializerSettings, this.comparer, ReadCacheEvict, epoch);
                     readcache.Initialize();
                     ReadCache = new LogAccessor<Key, Value, Input, Output, Context>(this, readcache);
                 }
@@ -151,7 +185,6 @@ namespace FASTER.core
             _systemState.version = 1;
             _checkpointType = CheckpointType.HYBRID_LOG_ONLY;
         }
-
 
         /// <summary>
         /// Take full checkpoint
@@ -343,9 +376,9 @@ namespace FASTER.core
             }
             else
             {
-                status = HandleOperationStatus(threadCtx, context, internalStatus);
+                status = HandleOperationStatus(threadCtx.Value, context, internalStatus);
             }
-            threadCtx.serialNum = monotonicSerialNum;
+            threadCtx.Value.serialNum = monotonicSerialNum;
             return status;
         }
 
@@ -370,9 +403,9 @@ namespace FASTER.core
             }
             else
             {
-                status = HandleOperationStatus(threadCtx, context, internalStatus);
+                status = HandleOperationStatus(threadCtx.Value, context, internalStatus);
             }
-            threadCtx.serialNum = monotonicSerialNum;
+            threadCtx.Value.serialNum = monotonicSerialNum;
             return status;
         }
 
@@ -396,30 +429,33 @@ namespace FASTER.core
             }
             else
             {
-                status = HandleOperationStatus(threadCtx, context, internalStatus);
+                status = HandleOperationStatus(threadCtx.Value, context, internalStatus);
             }
-            threadCtx.serialNum = monotonicSerialNum;
+            threadCtx.Value.serialNum = monotonicSerialNum;
             return status;
         }
 
         /// <summary>
-        /// Delete hash entry if possible as a best effort
-        /// Entry is deleted if key is in memory and at the head of hash chain
+        /// Delete entry (use tombstone if necessary)
+        /// Hash entry is removed as a best effort (if key is in memory and at 
+        /// the head of hash chain.
         /// Value is set to null (using ConcurrentWrite) if it is in mutable region
         /// </summary>
         /// <param name="key"></param>
+        /// <param name="userContext"></param>
         /// <param name="monotonicSerialNum"></param>
         /// <returns></returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public Status DeleteFromMemory(ref Key key, long monotonicSerialNum)
+        public Status Delete(ref Key key, Context userContext, long monotonicSerialNum)
         {
-            var internalStatus = InternalDeleteFromMemory(ref key);
+            var context = default(PendingContext);
+            var internalStatus = InternalDelete(ref key, ref userContext, ref context);
             var status = default(Status);
             if (internalStatus == OperationStatus.SUCCESS || internalStatus == OperationStatus.NOTFOUND)
             {
                 status = (Status)internalStatus;
             }
-            threadCtx.serialNum = monotonicSerialNum;
+            threadCtx.Value.serialNum = monotonicSerialNum;
             return status;
         }
 
@@ -438,6 +474,8 @@ namespace FASTER.core
         public void Dispose()
         {
             base.Free();
+            threadCtx.Dispose();
+            prevThreadCtx.Dispose();
             hlog.Dispose();
         }
     }

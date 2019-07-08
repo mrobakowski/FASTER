@@ -18,7 +18,12 @@ namespace FASTER.core
         /// <summary>
         /// Buffer current and next page in scan sequence
         /// </summary>
-        DoublePageBuffering
+        DoublePageBuffering,
+
+        /// <summary>
+        /// Do not buffer - with this mode, you can only scan records already in main memory
+        /// </summary>
+        NoBuffering
     }
 
     /// <summary>
@@ -31,9 +36,15 @@ namespace FASTER.core
         /// <summary>
         /// Get next record
         /// </summary>
+        /// <param name="recordInfo"></param>
         /// <param name="key"></param>
         /// <param name="value"></param>
         /// <returns>True if record found, false if end of scan</returns>
-        bool GetNext(out Key key, out Value value);
+        bool GetNext(out RecordInfo recordInfo, out Key key, out Value value);
+
+        /// <summary>
+        /// Current address
+        /// </summary>
+        long CurrentAddress { get; }
     }
 }
