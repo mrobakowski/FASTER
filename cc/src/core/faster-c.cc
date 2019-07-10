@@ -245,8 +245,13 @@ extern "C" {
     /// Copy (and deep-copy) constructor.
     UpsertContext(const UpsertContext& other)
       : key_{ other.key_ }
-      , input_{ other.input_ }
       , length_{ other.length_ } {
+      input_ = new uint8_t[other.length_];
+      memcpy(input_, other.input_, other.length_);
+    }
+
+    ~UpsertContext() {
+      delete[] input_;
     }
 
     /// The implicit and explicit interfaces require a key() accessor.
@@ -312,10 +317,15 @@ extern "C" {
     /// Copy (and deep-copy) constructor.
     RmwContext(const RmwContext& other)
       : key_{ other.key_ }
-      , modification_{ other.modification_ }
       , length_{ other.length_ }
       , cb_{ other.cb_ }
       , new_length_{ other.new_length_ }{
+      modification_ = new uint8_t[other.length_];
+      memcpy(modification_, other.modification_, other.length_);
+    }
+
+    ~RmwContext() {
+      delete[] modification_;
     }
 
     /// The implicit and explicit interfaces require a key() accessor.
@@ -333,13 +343,13 @@ extern "C" {
     }
 
     inline void RmwInitial(Value& value) {
-      value.gen_lock_.store(GenLock{});
+      value.gen_lock_.store(0);
       value.size_ = sizeof(Value) + length_;
       value.length_ = length_;
       std::memcpy(value.buffer(), modification_, length_);
     }
     inline void RmwCopy(const Value& old_value, Value& value) {
-      value.gen_lock_.store(GenLock{});
+      value.gen_lock_.store(0);
       value.length_ = cb_(old_value.buffer(), old_value.length_, modification_, length_, value.buffer());
       value.size_ = sizeof(Value) + value.length_;
     }
@@ -421,11 +431,13 @@ extern "C" {
       assert(result == Status::Ok);
     };
 
-    // Clone key because it may be deallocated before record created
+    // Clone key and value because they may be deallocated before record created
     uint8_t* cloned_key = new uint8_t[key_length];
     memcpy(cloned_key, key, key_length);
+    uint8_t* cloned_value = new uint8_t[value_length];
+    memcpy(cloned_value, value, value_length);
 
-    UpsertContext context { cloned_key, key_length, value, value_length };
+    UpsertContext context { cloned_key, key_length, cloned_value, value_length };
     Status result;
     switch (faster_t->type) {
       case NULL_DISK:
@@ -444,10 +456,13 @@ extern "C" {
       CallbackContext<RmwContext> context { ctxt };
     };
 
-    // Clone key because it may be deallocated before rmw completed
+    // Clone key and value because they may be deallocated before rmw completed
     uint8_t* cloned_key = new uint8_t[key_length];
     memcpy(cloned_key, key, key_length);
-    RmwContext context{ cloned_key, key_length, modification, length, cb};
+    uint8_t* cloned_modification = new uint8_t[length];
+    memcpy(cloned_modification, modification, length);
+
+    RmwContext context{ cloned_key, key_length, cloned_modification, length, cb};
     Status result;
     switch (faster_t->type) {
       case NULL_DISK:
