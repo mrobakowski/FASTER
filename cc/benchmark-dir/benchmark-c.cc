@@ -63,7 +63,7 @@ std::atomic<uint64_t> total_duration_{ 0 };
 std::atomic<uint64_t> total_reads_done_{ 0 };
 std::atomic<uint64_t> total_writes_done_{ 0 };
 
-std::map<size_t, double> results_;
+std::map<size_t, std::vector<double>> results_;
 
 inline Op ycsb_a_50_50(std::mt19937& rng) {
   if(rng() % 100 < 50) {
@@ -371,44 +371,49 @@ int main(int argc, char* argv[]) {
 
   load_files(load_filename, run_filename);
 
-  size_t thread_configurations[] = {1, 2, 4, 8, 16, 32};
+  size_t thread_configurations[] = {1};
   for (int i = 0; i < (sizeof(thread_configurations) / sizeof(size_t)); i++) {
     size_t num_threads = thread_configurations[i];
-    size_t init_size = next_power_of_two(kInitCount / 2);
-    faster_t* store = faster_open_with_disk(init_size, 32*1024*1024*1024, "storage");
+    results_[num_threads] = std::vector<double>();
+    for (int j = 0; j < 3; j++) {
+        size_t init_size = next_power_of_two(kInitCount / 2);
+        faster_t* store = faster_open_with_disk(init_size, 34359738368, "storage");
 
-    printf("Populating the store...\n");
+        printf("Populating the store...\n");
 
-    setup_store(store, 32);
-    faster_dump_distribution(store);
-    printf("Store size: %" PRIu64 "\n", faster_size(store));
+        setup_store(store, 48);
+        faster_dump_distribution(store);
+        printf("Store size: %" PRIu64 "\n", faster_size(store));
 
-    printf("Running benchmark on %" PRIu64 " threads...\n", num_threads);
-    double result;
-    switch(workload) {
-      case Workload::A_50_50:
-        result = run_benchmark<ycsb_a_50_50>(store, num_threads);
-        break;
-      case Workload::RMW_100:
-        result = run_benchmark<ycsb_rmw_100>(store, num_threads);
-        break;
-      case Workload::UPSERT_100:
-        result = run_benchmark<ycsb_upsert_100>(store, num_threads);
-        break;
-      case Workload::READ_100:
-        result = run_benchmark<ycsb_read_100>(store, num_threads);
-        break;
-      default:
-        printf("Unknown workload!\n");
-        exit(1);
+        printf("Running benchmark on %" PRIu64 " threads...\n", num_threads);
+        double result;
+        switch(workload) {
+          case Workload::A_50_50:
+            result = run_benchmark<ycsb_a_50_50>(store, num_threads);
+            break;
+          case Workload::RMW_100:
+            result = run_benchmark<ycsb_rmw_100>(store, num_threads);
+            break;
+          case Workload::UPSERT_100:
+            result = run_benchmark<ycsb_upsert_100>(store, num_threads);
+            break;
+          case Workload::READ_100:
+            result = run_benchmark<ycsb_read_100>(store, num_threads);
+            break;
+          default:
+            printf("Unknown workload!\n");
+            exit(1);
+        }
+
+        faster_destroy(store);
+        std::experimental::filesystem::remove_all("storage");
+        std::vector<double> v = results_[num_threads];
+        v.push_back(result);
+        results_[num_threads] = v;
     }
-
-    faster_destroy(store);
-    std::experimental::filesystem::remove_all("storage");
-    results_[num_threads] = result;
   }
   for( auto const& x : results_ ) {
-    printf("%d threads %.2f ops/second/thread\n", x.first, x.second);
+    printf("%d threads %.2f %.2f %.2f ops/second/thread\n", x.first, x.second[0], x.second[1], x.second[2]);
   }
 
 
