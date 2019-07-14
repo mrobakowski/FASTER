@@ -35,7 +35,7 @@ extern "C" {
   typedef struct faster_rmw_callback_result faster_rmw_callback_result;
 
   typedef void (*read_callback)(void*, const uint8_t*, uint64_t, faster_status);
-  typedef faster_rmw_callback_result (*rmw_callback)(const uint8_t*, uint64_t, uint8_t*, uint64_t, uint8_t*);
+  typedef faster_rmw_callback_result (*rmw_callback)(const uint8_t*, uint64_t, uint8_t*, uint64_t);
 
   typedef struct faster_checkpoint_result faster_checkpoint_result;
   struct faster_checkpoint_result {

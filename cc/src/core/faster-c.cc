@@ -351,7 +351,7 @@ extern "C" {
       if (new_value_ != NULL) {
         deallocate_vec(new_value_, new_length_);
       }
-      faster_rmw_callback_result callbackResult = cb_(old_value.buffer(), old_value.length_, modification_, length_, NULL);
+      faster_rmw_callback_result callbackResult = cb_(old_value.buffer(), old_value.length_, modification_, length_);
       new_length_ = callbackResult.length;
       new_value_ = callbackResult.value;
       return sizeof(Value) + new_length_;
@@ -383,7 +383,7 @@ extern "C" {
       if (new_value_ != NULL) {
         deallocate_vec(new_value_, new_length_);
       }
-      faster_rmw_callback_result cb_result = cb_(value.buffer(), value.length_, modification_, length_, NULL);
+      faster_rmw_callback_result cb_result = cb_(value.buffer(), value.length_, modification_, length_);
       new_length_ = cb_result.length;
       new_value_ = cb_result.value;
       if(value.size_ < sizeof(Value) + new_length_) {
