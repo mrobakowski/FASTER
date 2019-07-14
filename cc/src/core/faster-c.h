@@ -17,9 +17,6 @@ extern "C" {
 
   typedef struct faster_t faster_t;
 
-  typedef struct faster_result faster_result;
-  typedef void (*faster_callback)(faster_result);
-
   enum faster_status {
       Ok,
       Pending,
@@ -31,8 +28,14 @@ extern "C" {
   };
   typedef enum faster_status faster_status;
 
+  struct faster_rmw_callback_result {
+      uint64_t length;
+      uint8_t* value;
+  };
+  typedef struct faster_rmw_callback_result faster_rmw_callback_result;
+
   typedef void (*read_callback)(void*, const uint8_t*, uint64_t, faster_status);
-  typedef uint64_t (*rmw_callback)(const uint8_t*, uint64_t, uint8_t*, uint64_t, uint8_t*);
+  typedef faster_rmw_callback_result (*rmw_callback)(const uint8_t*, uint64_t, uint8_t*, uint64_t, uint8_t*);
 
   typedef struct faster_checkpoint_result faster_checkpoint_result;
   struct faster_checkpoint_result {

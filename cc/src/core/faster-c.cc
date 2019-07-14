@@ -315,7 +315,8 @@ extern "C" {
       , modification_{ modification }
       , length_{ length }
       , cb_{ cb }
-      , new_length_{ 0 }{
+      , new_length_{ 0 }
+      , new_value_ { NULL} {
     }
 
     /// Copy (and deep-copy) constructor.
@@ -324,13 +325,18 @@ extern "C" {
       , modification_{ other.modification_ }
       , length_{ other.length_ }
       , cb_{ other.cb_ }
-      , new_length_{ other.new_length_ }{
+      , new_length_{ other.new_length_ }
+      , new_value_{ other.new_value_ }{
+      other.new_value_ = NULL;
       other.modification_ = NULL;
     }
 
     ~RmwContext() {
       if (modification_ != NULL) {
         deallocate_vec(modification_, length_);
+      }
+      if (new_value_ != NULL) {
+        deallocate_vec(new_value_, new_length_);
       }
     }
 
@@ -342,21 +348,27 @@ extern "C" {
       return sizeof(Value) + length_;
     }
     inline uint32_t value_size(const Value& old_value) {
-      if (new_length_ == 0) {
-        new_length_ = cb_(old_value.buffer(), old_value.length_, modification_, length_, NULL);
+      if (new_value_ != NULL) {
+        deallocate_vec(new_value_, new_length_);
       }
+      faster_rmw_callback_result callbackResult = cb_(old_value.buffer(), old_value.length_, modification_, length_, NULL);
+      new_length_ = callbackResult.length;
+      new_value_ = callbackResult.value;
       return sizeof(Value) + new_length_;
     }
 
     inline void RmwInitial(Value& value) {
+      assert(new_value_ == NULL);
       value.gen_lock_.store(GenLock{});
       value.size_ = sizeof(Value) + length_;
       value.length_ = length_;
       std::memcpy(value.buffer(), modification_, length_);
     }
     inline void RmwCopy(const Value& old_value, Value& value) {
+      assert(new_value_ != NULL);
       value.gen_lock_.store(GenLock{});
-      value.length_ = cb_(old_value.buffer(), old_value.length_, modification_, length_, value.buffer());
+      value.length_ = new_length_;
+      memcpy(value.buffer(), new_value_, new_length_);
       value.size_ = sizeof(Value) + value.length_;
     }
     inline bool RmwAtomic(Value& value) {
@@ -368,16 +380,19 @@ extern "C" {
         // Some other thread replaced this record.
         return false;
       }
-      if (new_length_ == 0) {
-        new_length_ = cb_(value.buffer(), value.length_, modification_, length_, NULL);
+      if (new_value_ != NULL) {
+        deallocate_vec(new_value_, new_length_);
       }
+      faster_rmw_callback_result cb_result = cb_(value.buffer(), value.length_, modification_, length_, NULL);
+      new_length_ = cb_result.length;
+      new_value_ = cb_result.value;
       if(value.size_ < sizeof(Value) + new_length_) {
         // Current value is too small for in-place update.
         value.gen_lock_.unlock(true);
         return false;
       }
       // In-place update overwrites length and buffer, but not size.
-      cb_(value.buffer(), value.length_, modification_, length_, value.buffer());
+      memcpy(value.buffer(), new_value_, new_length_);
       value.length_ = new_length_;
       value.gen_lock_.unlock(false);
       return true;
@@ -395,6 +410,7 @@ extern "C" {
     uint64_t length_;
     rmw_callback cb_;
     uint64_t new_length_;
+    uint8_t* new_value_;
   };
 
   enum store_type {
