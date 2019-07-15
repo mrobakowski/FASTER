@@ -371,7 +371,7 @@ int main(int argc, char* argv[]) {
 
   load_files(load_filename, run_filename);
 
-  size_t thread_configurations[] = {1};
+  size_t thread_configurations[] = {1, 2, 4, 8, 16, 32, 48};
   for (int i = 0; i < (sizeof(thread_configurations) / sizeof(size_t)); i++) {
     size_t num_threads = thread_configurations[i];
     results_[num_threads] = std::vector<double>();
