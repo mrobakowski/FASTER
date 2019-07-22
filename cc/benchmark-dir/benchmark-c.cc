@@ -85,9 +85,7 @@ inline Op ycsb_read_100(std::mt19937& rng) {
   return Op::Read;
 }
 
-void read_cb(void* target, const uint8_t* buffer, uint64_t length, faster_status status) {
-  assert(status == Ok);
-  assert(buffer[0] == 42);
+inline void read_cb(void* target, const uint8_t* buffer, uint64_t length, faster_status status) {
 }
 
 uint64_t rmw_cb(const uint8_t* current, uint64_t length, uint8_t* modification, uint64_t modification_length, uint8_t* dst) {
@@ -103,7 +101,6 @@ uint64_t rmw_cb(const uint8_t* current, uint64_t length, uint8_t* modification, 
 
 extern "C" {
   void deallocate_vec(uint8_t* vec, uint64_t length) {
-    delete[] vec;
   }
 }
 
@@ -247,11 +244,9 @@ void thread_setup_store(faster_t* store, size_t thread_idx) {
         }
       }
 
-      uint8_t* val = new uint8_t[1];
+      uint8_t val[8];
       val[0] = value;
-      uint8_t* key = new uint8_t[8];
-      memcpy(key, &init_keys_.get()[idx], 8);
-      faster_upsert(store, key, 8, val, 1, 1);
+      faster_upsert(store, &init_keys_.get()[idx], 8, val, 8, 1);
     }
   }
 
@@ -306,11 +301,9 @@ void thread_run_benchmark(faster_t* store, size_t thread_idx) {
       switch(FN(rng)) {
       case Op::Insert:
       case Op::Upsert: {
-        uint8_t* val = new uint8_t[1];
+        uint8_t val[8];
         val[0] = upsert_value;
-        uint8_t* key = new uint8_t[8];
-        memcpy(key, &txn_keys_.get()[idx], 8);
-        faster_upsert(store, key, 8, val, 1, 1);
+        faster_upsert(store, &txn_keys_.get()[idx], 8, val, 8, 1);
         ++writes_done;
         break;
       }
@@ -319,18 +312,14 @@ void thread_run_benchmark(faster_t* store, size_t thread_idx) {
         exit(1);
         break;
       case Op::Read: {
-        uint8_t* key = new uint8_t[8];
-        memcpy(key, &txn_keys_.get()[idx], 8);
-        faster_read(store, key, 8, 1, read_cb, NULL);
+        faster_read(store, &txn_keys_.get()[idx], 8, 1, read_cb, NULL);
         ++reads_done;
         break;
       }
       case Op::ReadModifyWrite:
-        uint8_t* modification = new uint8_t[1];
+        uint8_t modification[8];
         modification[0] = 0;
-        uint8_t* key = new uint8_t[8];
-        memcpy(key, &txn_keys_.get()[idx], 8);
-        uint8_t result = faster_rmw(store, key, 8, modification, 1, 1, rmw_cb);
+        uint8_t result = faster_rmw(store, &txn_keys_.get()[idx], 8, modification, 1, 1, rmw_cb);
         if(result == 0) {
           ++writes_done;
         }
