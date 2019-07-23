@@ -51,10 +51,6 @@ static_assert(kCompletePendingInterval % kRefreshInterval == 0,
 
 static constexpr uint64_t kNanosPerSecond = 1000000000;
 
-static constexpr uint64_t kMaxKey = 268435456;
-static constexpr uint64_t kRunSeconds = 360;
-static constexpr uint64_t kCheckpointSeconds = 30;
-
 aligned_unique_ptr_t<uint64_t> init_keys_;
 aligned_unique_ptr_t<uint64_t> txn_keys_;
 std::atomic<uint64_t> idx_{ 0 };
@@ -549,44 +545,10 @@ double run_benchmark(store_t* store, size_t num_threads) {
     threads.emplace_back(&thread_run_benchmark<FN>, store, thread_idx);
   }
 
-  static std::atomic<uint64_t> num_checkpoints;
-  num_checkpoints = 0;
+  do {
+    std::this_thread::sleep_for(std::chrono::seconds(30));
+  } while (threads_waiting_.load() > 0);
 
-  if(kCheckpointSeconds == 0) {
-    std::this_thread::sleep_for(std::chrono::seconds(kRunSeconds));
-  } else {
-    auto callback = [](Status result, uint64_t persistent_serial_num) {
-      if(result != Status::Ok) {
-        printf("Thread %" PRIu32 " reports checkpoint failed.\n",
-               Thread::id());
-      } else {
-        ++num_checkpoints;
-      }
-    };
-
-    auto start_time = std::chrono::high_resolution_clock::now();
-    auto last_checkpoint_time = start_time;
-    auto current_time = start_time;
-
-    uint64_t checkpoint_num = 0;
-
-    do {
-      std::this_thread::sleep_for(std::chrono::seconds(10));
-      current_time = std::chrono::high_resolution_clock::now();
-      if(current_time - last_checkpoint_time >= std::chrono::seconds(kCheckpointSeconds)) {
-        Guid token;
-        bool success = store->Checkpoint(nullptr, callback, token);
-        if(success) {
-          printf("Starting checkpoint %" PRIu64 ".\n", checkpoint_num);
-          ++checkpoint_num;
-        } else {
-          printf("Failed to start checkpoint.\n");
-        }
-        last_checkpoint_time = current_time;
-      }
-    } while (threads_waiting_.load() > 0);
-
-  }
 
   for(auto& thread : threads) {
     thread.join();
@@ -596,8 +558,8 @@ double run_benchmark(store_t* store, size_t num_threads) {
   double ops_per_second_per_thread = ((double)total_reads_done_ + (double)total_writes_done_) / ((double)total_duration_ /
              kNanosPerSecond);
 
-  printf("Finished benchmark: %" PRIu64 " thread checkpoints completed;  %.2f ops/second/thread\n",
-         num_checkpoints.load(), ops_per_second_per_thread);
+  printf("Finished benchmark: %" PRIu64 " threads;  %.2f ops/second/thread\n",
+         num_threads, ops_per_second_per_thread);
   return ops_per_second_per_thread;
 }
 
@@ -614,9 +576,21 @@ int main(int argc, char* argv[]) {
   std::string run_filename{ argv[4] };
 
   load_files(load_filename, run_filename);
-  size_t thread_configurations[] = {1, 2, 4, 8, 16, 32, 48};
-  for (int i = 0; i < (sizeof(thread_configurations) / sizeof(size_t)); i++) {
-    size_t num_benchmark_threads = thread_configurations[i];
+
+  std::vector<size_t> thread_configurations = std::vector<size_t>();
+  if (num_threads == 0) {
+    thread_configurations.push_back(1);
+    thread_configurations.push_back(2);
+    thread_configurations.push_back(4);
+    thread_configurations.push_back(8);
+    thread_configurations.push_back(16);
+    thread_configurations.push_back(32);
+    thread_configurations.push_back(48);
+  } else {
+    thread_configurations.push_back(num_threads);
+  }
+
+  for (auto const& num_benchmark_threads: thread_configurations) {
     results_[num_benchmark_threads] = std::vector<double>();
     for (int j = 0; j < 3; j++) {
       size_t init_size = next_power_of_two(kInitCount / 2);
@@ -624,7 +598,7 @@ int main(int argc, char* argv[]) {
 
       printf("Populating the store...\n");
 
-      setup_store(&store, num_threads);
+      setup_store(&store, 48);
 
       store.DumpDistribution();
       printf("Store Size: %" PRIu64 "\n", store.Size());

@@ -51,10 +51,6 @@ static_assert(kCompletePendingInterval % kRefreshInterval == 0,
 
 static constexpr uint64_t kNanosPerSecond = 1000000000;
 
-static constexpr uint64_t kMaxKey = 268435456;
-static constexpr uint64_t kRunSeconds = 360;
-static constexpr uint64_t kCheckpointSeconds = 30;
-
 aligned_unique_ptr_t<uint8_t> init_keys_;
 aligned_unique_ptr_t<uint8_t> txn_keys_;
 std::atomic<uint64_t> idx_{ 0 };
@@ -352,28 +348,9 @@ double run_benchmark(faster_t* store, size_t num_threads) {
     threads.emplace_back(&thread_run_benchmark<FN>, store, thread_idx);
   }
 
-  uint64_t num_checkpoints = 0;
-
-  auto start_time = std::chrono::high_resolution_clock::now();
-  auto last_checkpoint_time = start_time;
-  auto current_time = start_time;
 
   do {
-    std::this_thread::sleep_for(std::chrono::seconds(10));
-    current_time = std::chrono::high_resolution_clock::now();
-    if(current_time - last_checkpoint_time >= std::chrono::seconds(kCheckpointSeconds)) {
-      Guid token;
-      faster_checkpoint_result* result = faster_checkpoint(store);
-      if(result->checked) {
-        printf("Starting checkpoint %" PRIu64 ".\n", num_checkpoints);
-        ++num_checkpoints;
-      } else {
-        printf("Failed to start checkpoint.\n");
-      }
-      last_checkpoint_time = current_time;
-      free(result->token);
-      free(result);
-    }
+    std::this_thread::sleep_for(std::chrono::seconds(30));
   } while(threads_waiting_.load() > 0);
 
   for(auto& thread : threads) {
@@ -383,8 +360,8 @@ double run_benchmark(faster_t* store, size_t num_threads) {
   double ops_per_second_per_thread = ((double)total_reads_done_ + (double)total_writes_done_) / ((double)total_duration_ /
              kNanosPerSecond);
 
-  printf("Finished benchmark: %" PRIu64 " thread checkpoints completed;  %.2f ops/second/thread\n",
-         num_checkpoints, ops_per_second_per_thread);
+  printf("Finished benchmark: %" PRIu64 " threads;  %.2f ops/second/thread\n",
+         num_threads, ops_per_second_per_thread);
   return ops_per_second_per_thread;
 }
 
@@ -402,9 +379,20 @@ int main(int argc, char* argv[]) {
 
   load_files(load_filename, run_filename);
 
-  size_t thread_configurations[] = {1, 2, 4, 8, 16, 32, 48};
-  for (int i = 0; i < (sizeof(thread_configurations) / sizeof(size_t)); i++) {
-    size_t num_threads = thread_configurations[i];
+  std::vector<size_t> thread_configurations = std::vector<size_t>();
+  if (num_threads == 0) {
+    thread_configurations.push_back(1);
+    thread_configurations.push_back(2);
+    thread_configurations.push_back(4);
+    thread_configurations.push_back(8);
+    thread_configurations.push_back(16);
+    thread_configurations.push_back(32);
+    thread_configurations.push_back(48);
+  } else {
+    thread_configurations.push_back(num_threads);
+  }
+
+  for (auto const& num_benchmark_threads: thread_configurations) {
     results_[num_threads] = std::vector<double>();
     for (int j = 0; j < 3; j++) {
         size_t init_size = next_power_of_two(kInitCount / 2);
