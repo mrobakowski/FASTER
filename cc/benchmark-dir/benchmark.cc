@@ -594,7 +594,7 @@ int main(int argc, char* argv[]) {
     results_[num_benchmark_threads] = std::vector<double>();
     for (int j = 0; j < 3; j++) {
       size_t init_size = next_power_of_two(kInitCount / 2);
-      store_t store{ init_size, 34359738368, "storage" };
+      store_t store{ init_size, 2*34359738368, "storage" };
 
       printf("Populating the store...\n");
 
