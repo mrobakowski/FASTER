@@ -75,82 +75,10 @@ extern "C" {
   class UpsertContext;
   class RmwContext;
 
-  class GenLock {
-  public:
-    GenLock()
-      : control_{ 0 } {
-    }
-    GenLock(uint64_t control)
-      : control_{ control } {
-    }
-    inline GenLock& operator=(const GenLock& other) {
-      control_ = other.control_;
-      return *this;
-    }
-
-    union {
-      struct {
-        uint64_t gen_number : 62;
-        uint64_t locked : 1;
-        uint64_t replaced : 1;
-      };
-      uint64_t control_;
-    };
-  };
-
-  class AtomicGenLock {
-  public:
-    AtomicGenLock()
-      : control_{ 0 } {
-    }
-    AtomicGenLock(uint64_t control)
-      : control_{ control } {
-    }
-
-    inline GenLock load() const {
-      return GenLock{ control_.load() };
-    }
-    inline void store(GenLock desired) {
-      control_.store(desired.control_);
-    }
-
-    inline bool try_lock(bool& replaced) {
-      replaced = false;
-      GenLock expected{ control_.load() };
-      expected.locked = 0;
-      expected.replaced = 0;
-      GenLock desired{ expected.control_ };
-      desired.locked = 1;
-
-      if(control_.compare_exchange_strong(expected.control_, desired.control_)) {
-        return true;
-      }
-      if(expected.replaced) {
-        replaced = true;
-      }
-      return false;
-    }
-    inline void unlock(bool replaced) {
-      if(!replaced) {
-        // Just turn off "locked" bit and increase gen number.
-        uint64_t sub_delta = ((uint64_t)1 << 62) - 1;
-        control_.fetch_sub(sub_delta);
-      } else {
-        // Turn off "locked" bit, turn on "replaced" bit, and increase gen number
-        uint64_t add_delta = ((uint64_t)1 << 63) - ((uint64_t)1 << 62) + 1;
-        control_.fetch_add(add_delta);
-      }
-    }
-
-  private:
-    std::atomic<uint64_t> control_;
-  };
-
   class Value {
   public:
     Value()
-      : gen_lock_{ 0 }
-      , size_{ 0 }
+      : size_{ 0 }
       , length_{ 0 } {
     }
 
@@ -163,7 +91,6 @@ extern "C" {
     friend class RmwContext;
 
   private:
-    AtomicGenLock gen_lock_;
     uint64_t size_;
     uint64_t length_;
 
@@ -202,18 +129,7 @@ extern "C" {
       cb_(target_, value.buffer(), value.length_, Ok);
     }
     inline void GetAtomic(const Value& value) {
-      GenLock before, after;
-      uint8_t* buffer = NULL;
-      uint64_t length = 0;
-      do {
-        before = value.gen_lock_.load();
-        buffer = (uint8_t*) realloc(buffer, value.length_);
-        memcpy(buffer, value.buffer(), value.length_);
-        length = value.length_;
-        after = value.gen_lock_.load();
-      } while(before.gen_number != after.gen_number);
-      cb_(target_, buffer, length, Ok);
-      free(buffer);
+      cb_(target_, value.buffer(), value.length_, Ok);
     }
 
     /// For async reads returning not found
@@ -267,29 +183,18 @@ extern "C" {
     }
     /// Non-atomic and atomic Put() methods.
     inline void Put(Value& value) {
-      value.gen_lock_.store(0);
       value.size_ = sizeof(Value) + length_;
       value.length_ = length_;
       std::memcpy(value.buffer(), input_, length_);
     }
     inline bool PutAtomic(Value& value) {
-      bool replaced;
-      while(!value.gen_lock_.try_lock(replaced) && !replaced) {
-        std::this_thread::yield();
-      }
-      if(replaced) {
-        // Some other thread replaced this record.
-        return false;
-      }
       if(value.size_ < sizeof(Value) + length_) {
         // Current value is too small for in-place update.
-        value.gen_lock_.unlock(true);
         return false;
       }
       // In-place update overwrites length and buffer, but not size.
       value.length_ = length_;
       std::memcpy(value.buffer(), input_, length_);
-      value.gen_lock_.unlock(false);
       return true;
     }
 
@@ -349,37 +254,25 @@ extern "C" {
     }
 
     inline void RmwInitial(Value& value) {
-      value.gen_lock_.store(0);
       value.size_ = sizeof(Value) + length_;
       value.length_ = length_;
       std::memcpy(value.buffer(), modification_, length_);
     }
     inline void RmwCopy(const Value& old_value, Value& value) {
-      value.gen_lock_.store(0);
       value.length_ = cb_(old_value.buffer(), old_value.length_, modification_, length_, value.buffer());
       value.size_ = sizeof(Value) + value.length_;
     }
     inline bool RmwAtomic(Value& value) {
-      bool replaced;
-      while(!value.gen_lock_.try_lock(replaced) && !replaced) {
-        std::this_thread::yield();
-      }
-      if(replaced) {
-        // Some other thread replaced this record.
-        return false;
-      }
       if (new_length_ == 0) {
         new_length_ = cb_(value.buffer(), value.length_, modification_, length_, NULL);
       }
       if(value.size_ < sizeof(Value) + new_length_) {
         // Current value is too small for in-place update.
-        value.gen_lock_.unlock(true);
         return false;
       }
       // In-place update overwrites length and buffer, but not size.
       cb_(value.buffer(), value.length_, modification_, length_, value.buffer());
       value.length_ = new_length_;
-      value.gen_lock_.unlock(false);
       return true;
     }
 
