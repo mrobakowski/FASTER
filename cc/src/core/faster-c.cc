@@ -224,13 +224,18 @@ extern "C" {
   protected:
     /// The explicit interface requires a DeepCopy_Internal() implementation.
     Status DeepCopy_Internal(IAsyncContext*& context_copy) {
-      return IAsyncContext::DeepCopy_Internal(*this, context_copy);
+      context_copy = nullptr;
+      auto ctxt = alloc_context<ReadContext>(sizeof(ReadContext) + key().size());
+      if(!ctxt.get()) return Status::OutOfMemory;
+      new(ctxt.get()) ReadContext{ *this };
+      context_copy = ctxt.release();
+      return Status::Ok;
     }
 
   private:
-    Key key_;
     read_callback cb_;
     void* target_;
+    key_t key_;
   };
 
   class UpsertContext : public IAsyncContext {
@@ -296,13 +301,20 @@ extern "C" {
   protected:
     /// The explicit interface requires a DeepCopy_Internal() implementation.
     Status DeepCopy_Internal(IAsyncContext*& context_copy) {
-      return IAsyncContext::DeepCopy_Internal(*this, context_copy);
+      context_copy = nullptr;
+      // TODO: we may need to also allocate size for input somewhere after the key
+      //  and make this thing self-referential
+      auto ctxt = alloc_context<UpsertContext>(sizeof(UpsertContext) + key().size());
+      if(!ctxt.get()) return Status::OutOfMemory;
+      new(ctxt.get()) UpsertContext{ *this };
+      context_copy = ctxt.release();
+      return Status::Ok;
     }
 
   private:
-    key_t key_;
     uint8_t* input_;
     uint64_t length_;
+    key_t key_;
   };
 
   class RmwContext : public IAsyncContext {
@@ -386,48 +398,58 @@ extern "C" {
   protected:
     /// The explicit interface requires a DeepCopy_Internal() implementation.
     Status DeepCopy_Internal(IAsyncContext*& context_copy) {
-      return IAsyncContext::DeepCopy_Internal(*this, context_copy);
+      context_copy = nullptr;
+      auto ctxt = alloc_context<RmwContext>(sizeof(RmwContext) + key().size());
+      if(!ctxt.get()) return Status::OutOfMemory;
+      new(ctxt.get()) RmwContext{ *this };
+      context_copy = ctxt.release();
+      return Status::Ok;
     }
 
   private:
-    Key key_;
     uint8_t* modification_;
     uint64_t length_;
     rmw_callback cb_;
     uint64_t new_length_;
+    key_t key_;
   };
 
   class DeleteContext : public IAsyncContext {
   public:
-      typedef Key key_t;
-      typedef Value value_t;
+    typedef Key key_t;
+    typedef Value value_t;
 
-      DeleteContext(const uint8_t* key, uint64_t key_length)
-      : key_{ key, key_length } {
+    DeleteContext(const uint8_t* key, uint64_t key_length)
+    : key_{ key, key_length } {
 
-      }
+    }
 
-      /// Copy (and deep-copy) constructor.
-      DeleteContext(DeleteContext& other)
-      : key_ { other.key_ } {
-      }
+    /// Copy (and deep-copy) constructor.
+    DeleteContext(DeleteContext& other)
+    : key_ { other.key_ } {
+    }
 
-      /// The implicit and explicit interfaces require a key() accessor.
-      inline const Key& key() const {
-        return key_;
-      }
-      inline uint32_t value_size() const {
-        return sizeof(value_t);
-      }
+    /// The implicit and explicit interfaces require a key() accessor.
+    inline const Key& key() const {
+      return key_;
+    }
+    inline uint32_t value_size() const {
+      return sizeof(value_t);
+    }
 
   protected:
-      /// The explicit interface requires a DeepCopy_Internal() implementation.
-      Status DeepCopy_Internal(IAsyncContext*& context_copy) {
-        return IAsyncContext::DeepCopy_Internal(*this, context_copy);
-      }
+    /// The explicit interface requires a DeepCopy_Internal() implementation.
+    Status DeepCopy_Internal(IAsyncContext*& context_copy) {
+      context_copy = nullptr;
+      auto ctxt = alloc_context<DeleteContext>(sizeof(DeleteContext) + key().size());
+      if(!ctxt.get()) return Status::OutOfMemory;
+      new(ctxt.get()) DeleteContext{ *this };
+      context_copy = ctxt.release();
+      return Status::Ok;
+    }
 
   private:
-      key_t key_;
+    key_t key_;
   };
 
   enum store_type {
